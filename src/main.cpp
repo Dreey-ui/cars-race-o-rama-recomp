@@ -1,4 +1,4 @@
-// Ponto de entrada: carrega o XEX descriptografado na memória guest e roda _xstart
+// Entry point: loads the decrypted XEX into guest memory and runs _xstart
 #include "kernel.h"
 #include "video.h"
 #include "gpu/renderer.h"
@@ -23,8 +23,8 @@
 #  endif
 #  include <windows.h>
 
-// CARS_TRAP=endereco,tamanho (hex, memoria fisica): diagnostico -- protege a faixa (nas 3 vistas fisicas) e loga o primeiro
-// acesso da CPU (quem le/escreve), depois libera a faixa
+// CARS_TRAP=address,size (hex, physical memory): diagnostics -- protects the range (in the 3 physical views) and logs the first
+// CPU access (who reads/writes), then unprotects the range
 static uint32_t g_trapPhys = 0, g_trapSize = 0;
 static void SetTrapProtection(DWORD prot)
 {
@@ -45,8 +45,8 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
         if (f >= (uint64_t)g_mem.base && g >= 0xA0000000ull && ((g & 0x1FFFFFFF) - g_trapPhys) < g_trapSize)
         {
             const GuestThread* gt = CurrentThread();
-            fprintf(stderr, "[trap] %s de %08llX (fisico %08llX) pela thread guest %u lr=%08X | pilha:",
-                    e->ExceptionRecord->ExceptionInformation[0] == 1 ? "escrita" : "leitura", (unsigned long long)g,
+            fprintf(stderr, "[trap] %s of %08llX (physical %08llX) by guest thread %u lr=%08X | stack:",
+                    e->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "read", (unsigned long long)g,
                     (unsigned long long)(g & 0x1FFFFFFF), gt ? gt->threadId : 0, gt && gt->ctx ? uint32_t(gt->ctx->lr) : 0);
             if (gt && gt->ctx)
             {
@@ -69,27 +69,27 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
     }
     if (code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters > 1 && g_mem.base)
     {
-        // Frontbuffer protegido (so existe na GPU do host): a CPU do jogo quer ler -> copia da GPU e continua
+        // Protected frontbuffer (only exists on the host GPU): the game's CPU wants to read it -> copy from the GPU and continue
         const uint64_t fa = e->ExceptionRecord->ExceptionInformation[1];
         if (fa >= (uint64_t)g_mem.base && fa < (uint64_t)g_mem.base + 0x100000000ull &&
             RendererHandleFrontbufferAccess(uint32_t(fa - (uint64_t)g_mem.base)))
             return EXCEPTION_CONTINUE_EXECUTION;
-        // Escrita numa pagina vigiada pelo cache de VB/IB da GPU: marca suja, libera e repete a instrucao
+        // Write to a page watched by the GPU VB/IB cache: mark dirty, unprotect and retry the instruction
         if (e->ExceptionRecord->ExceptionInformation[0] == 1 && fa >= (uint64_t)g_mem.base && fa < (uint64_t)g_mem.base + 0x100000000ull &&
             MemWatchHandleWriteFault(uint32_t(fa - (uint64_t)g_mem.base)))
             return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters > 1 && g_mem.base)
     {
-        // Pagina do guest ainda nao mapeada: mapeia zerada e segue (so para exploracao; ate 512x)
+        // Guest page not mapped yet: map it zeroed and go on (exploration only; up to 512x)
         const uint64_t f = e->ExceptionRecord->ExceptionInformation[1];
         static LONG autoCount = 0;
         if (f >= (uint64_t)g_mem.base && f < (uint64_t)g_mem.base + 0x100000000ull && autoCount < 512)
         {
             const uint32_t g = uint32_t(f - (uint64_t)g_mem.base);
             InterlockedIncrement(&autoCount);
-            fprintf(stderr, "[auto-map] %s guest 0x%08X (pagina mapeada com zeros)\n",
-                    e->ExceptionRecord->ExceptionInformation[0] == 1 ? "escrita em" : "leitura de", g);
+            fprintf(stderr, "[auto-map] %s guest 0x%08X (page mapped with zeros)\n",
+                    e->ExceptionRecord->ExceptionInformation[0] == 1 ? "write to" : "read from", g);
             fflush(stderr);
             if (g_mem.Commit(g & ~0xFFFu, 0x1000))
                 return EXCEPTION_CONTINUE_EXECUTION;
@@ -106,27 +106,27 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
     const uint64_t rip = (uint64_t)e->ExceptionRecord->ExceptionAddress;
     HMODULE mod = nullptr;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)rip, &mod);
-    fprintf(stderr, "\n[CRASH] codigo=0x%08lX tipo=%s\n", code,
-            code == EXCEPTION_ACCESS_VIOLATION ? (e->ExceptionRecord->ExceptionInformation[0] == 1 ? "escrita" : e->ExceptionRecord->ExceptionInformation[0] == 8 ? "execucao" : "leitura") : "-");
-    fprintf(stderr, "[CRASH] endereco do host=0x%016llX  rip=0x%016llX  (rip - modulo = 0x%llX)\n",
+    fprintf(stderr, "\n[CRASH] code=0x%08lX type=%s\n", code,
+            code == EXCEPTION_ACCESS_VIOLATION ? (e->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : e->ExceptionRecord->ExceptionInformation[0] == 8 ? "execute" : "read") : "-");
+    fprintf(stderr, "[CRASH] host address=0x%016llX  rip=0x%016llX  (rip - module = 0x%llX)\n",
             (unsigned long long)fault, (unsigned long long)rip, (unsigned long long)(rip - (uint64_t)mod));
     if (g_mem.base && fault >= (uint64_t)g_mem.base && fault < (uint64_t)g_mem.base + 0x100000000ull)
-        fprintf(stderr, "[CRASH] endereco GUEST = 0x%08llX\n", (unsigned long long)(fault - (uint64_t)g_mem.base));
+        fprintf(stderr, "[CRASH] GUEST address = 0x%08llX\n", (unsigned long long)(fault - (uint64_t)g_mem.base));
     {
         const CONTEXT* c = e->ContextRecord;
         const uint8_t* ip = reinterpret_cast<const uint8_t*>(rip);
         if (rip < 0x10000)
         {
-            // Chamada por ponteiro nulo: o endereco de retorno esta no topo da pilha
+            // Call through a null pointer: the return address is at the top of the stack
             const uint64_t ret = *reinterpret_cast<const uint64_t*>(c->Rsp);
             HMODULE m2 = nullptr;
             GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ret, &m2);
-            fprintf(stderr, "[CRASH] chamada para endereco nulo; retorno = 0x%016llX (retorno - modulo = 0x%llX)\n",
+            fprintf(stderr, "[CRASH] call to a null address; return = 0x%016llX (return - module = 0x%llX)\n",
                     (unsigned long long)ret, (unsigned long long)(ret - (uint64_t)m2));
         }
         if (GuestThread* gt = CurrentThread(); gt && gt->ctx)
         {
-            fprintf(stderr, "[CRASH] thread guest %u: lr=%08X ctr=%08X r3=%08X r1=%08X | pilha guest:", gt->threadId, uint32_t(gt->ctx->lr),
+            fprintf(stderr, "[CRASH] guest thread %u: lr=%08X ctr=%08X r3=%08X r1=%08X | guest stack:", gt->threadId, uint32_t(gt->ctx->lr),
                     gt->ctx->ctr.u32, gt->ctx->r3.u32, gt->ctx->r1.u32);
             uint32_t sp = gt->ctx->r1.u32;
             for (int i = 0; i < 12 && sp >= 0x10000 && g_mem.base; i++)
@@ -147,8 +147,8 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* e)
         fprintf(stderr, "[CRASH] r8=%llX r9=%llX r10=%llX r11=%llX r12=%llX r13=%llX r14=%llX r15=%llX\n",
                 c->R8, c->R9, c->R10, c->R11, c->R12, c->R13, c->R14, c->R15);
     }
-    // o log tem que chegar no arquivo antes do processo morrer (se alguem tratar a excecao, a sessao continua)
-    fprintf(stderr, "[sessao] fim (CRASH)\n");
+    // the log has to reach the file before the process dies (if someone handles the exception, the session goes on)
+    fprintf(stderr, "[session] end (CRASH)\n");
     SessionLogFlush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -168,13 +168,13 @@ void LogUnimplementedImport(const char* name, PPCContext& ctx)
     const uint64_t n = ++g_importCounts[name];
     if (n <= 3)
     {
-        fprintf(stderr, "[import nao implementado] %s(r3=%08X r4=%08X r5=%08X r6=%08X)%s\n",
-                name, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, n == 3 ? "  (silenciando)" : "");
+        fprintf(stderr, "[unimplemented import] %s(r3=%08X r4=%08X r5=%08X r6=%08X)%s\n",
+                name, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, n == 3 ? "  (silencing)" : "");
     }
 }
 
-// Detecta loops: a cada 3 s mostra os imports chamados muitas vezes desde a ultima checagem. Tambem avisa quando a imagem
-// para de andar (nenhum swap ha 6 s): loga as pilhas guest de todas as threads uma vez por travada
+// Loop detection: every 3 s shows the imports called many times since the last check. Also warns when the picture
+// stops moving (no swap for 6 s): logs the guest stacks of all threads once per hang
 static void MonitorThread()
 {
     std::unordered_map<std::string, uint64_t> last;
@@ -191,14 +191,14 @@ static void MonitorThread()
             if (idle >= 6.0 && !frozen)
             {
                 frozen = true;
-                fprintf(stderr, "[travou?] nenhum frame novo ha %.0f s; pilhas das threads do jogo:\n", idle);
+                fprintf(stderr, "[hang?] no new frame for %.0f s; stacks of the game threads:\n", idle);
                 KDumpGuestStacks();
                 SessionLogFlush();
             }
             else if (idle < 6.0 && frozen)
             {
                 frozen = false;
-                fprintf(stderr, "[travou?] a imagem voltou a andar\n");
+                fprintf(stderr, "[hang?] the picture is moving again\n");
             }
         }
         std::lock_guard<std::mutex> lock(g_logMutex);
@@ -206,17 +206,17 @@ static void MonitorThread()
         {
             const uint64_t d = n - last[name];
             if (d >= 100)
-                fprintf(stderr, "[monitor] %s chamado %llu vezes nos ultimos 3s\n", name.c_str(), (unsigned long long)d);
+                fprintf(stderr, "[monitor] %s called %llu times in the last 3s\n", name.c_str(), (unsigned long long)d);
             last[name] = n;
         }
     }
 }
 
-// Erro fatal: no log e numa caixa de mensagem (o exe nao tem console quando aberto com dois cliques)
+// Fatal error: in the log and in a message box (the exe has no console when opened with a double click)
 static int Fatal(const char* msg)
 {
     fprintf(stderr, "%s\n", msg);
-    SessionLogEnd("erro fatal");
+    SessionLogEnd("fatal error");
     MessageBoxA(nullptr, msg, "Cars Race-O-Rama (recomp)", MB_OK | MB_ICONERROR);
     return 1;
 }
@@ -228,7 +228,7 @@ static std::filesystem::path ExeDir()
     return std::filesystem::path(exe).parent_path();
 }
 
-// XEX embutido no exe (recurso RCDATA 101, src/xex_image.rc): o arquivo default_dec.xex nao e mais necessario
+// XEX embedded in the exe (RCDATA resource 101, src/xex_image.rc): the default_dec.xex file is no longer needed
 static std::vector<uint8_t> LoadEmbeddedXex()
 {
     HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
@@ -245,9 +245,9 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, CrashHandler);
 #endif
-    // Ferramenta (sem abrir o jogo e sem log de sessao, para nao empurrar as sessoes de jogo para fora do rodizio):
-    // CarsRecomp --montar <pasta X.x360.str ou X.x360.res> <arquivo de saida> monta uma pasta extraida das cenas
-    if (argc == 4 && !strcmp(argv[1], "--montar"))
+    // Tool (does not start the game and writes no session log, so game sessions are not pushed out of the rotation):
+    // CarsRecomp --build-folder <folder X.x360.str or X.x360.res> <output file> builds an extracted scene folder
+    if (argc == 4 && !strcmp(argv[1], "--build-folder"))
     {
         const std::filesystem::path folder = argv[2];
         uint64_t size = 0;
@@ -263,9 +263,9 @@ int main(int argc, char** argv)
             fclose(in);
         return out ? 0 : 1;
     }
-    // CarsRecomp --montar-solto <pasta dos mods> <C\Scenes\X\X.x360.res> <saida>: monta uma cena em arquivos soltos
-    // (mods\C\Scenes\X\_pacote + geo/tex/col) em <saida>.res e <saida>.str, sem abrir o jogo
-    if (argc == 5 && !strcmp(argv[1], "--montar-solto"))
+    // CarsRecomp --build-loose <mods folder> <C\Scenes\X\X.x360.res> <output>: builds a scene from loose files
+    // (mods\C\Scenes\X\_package + geo/tex/col) into <output>.res and <output>.str, without starting the game
+    if (argc == 5 && !strcmp(argv[1], "--build-loose"))
     {
         const std::filesystem::path root = argv[2], rel = argv[3], out = argv[4];
         std::string stem = rel.filename().string();
@@ -276,10 +276,10 @@ int main(int argc, char** argv)
         str += ".str";
         return LooseSceneBuildFiles(root, (root / rel).parent_path(), stem, res, str) ? 0 : 1;
     }
-    // logs\<data e hora>\jogo.log ao lado do exe (session_log.cpp): tudo que o runtime escreve, com horario
+    // logs\<date and time>\game.log next to the exe (session_log.cpp): everything the runtime writes, with the time
     SessionLogStart();
-    // Uso: CarsRecomp [<default_dec.xex> <pasta_do_jogo>] [--trace] [--novsync] [--nowindow] [--profile]
-    // Sem caminhos: XEX embutido e pasta do jogo = pasta do exe (o exe fica dentro da pasta do jogo)
+    // Usage: CarsRecomp [<default_dec.xex> <game_folder>] [--trace] [--novsync] [--nowindow] [--profile]
+    // Without paths: embedded XEX and game folder = exe folder (the exe lives inside the game folder)
     std::vector<const char*> positional;
     bool vsync = SettingsGetInt(L"Video", L"VSync", 1) != 0, window = true, profile = false;
     for (int i = 1; i < argc; i++)
@@ -296,7 +296,7 @@ int main(int argc, char** argv)
             positional.push_back(argv[i]);
     }
     std::vector<uint8_t> file;
-    STEP("lendo o XEX");
+    STEP("reading the XEX");
     if (positional.size() >= 2)
     {
         g_gameRoot = positional[1];
@@ -304,7 +304,7 @@ int main(int argc, char** argv)
         if (file.empty())
         {
             char msg[600];
-            snprintf(msg, sizeof(msg), "Nao consegui abrir %s", positional[0]);
+            snprintf(msg, sizeof(msg), "Could not open %s", positional[0]);
             return Fatal(msg);
         }
     }
@@ -313,61 +313,61 @@ int main(int argc, char** argv)
         g_gameRoot = positional.size() == 1 ? positional[0] : ExeDir().string();
         file = LoadEmbeddedXex();
         if (file.empty())
-            return Fatal("XEX embutido nao encontrado no executavel.");
+            return Fatal("Embedded XEX not found in the executable.");
         std::error_code ec;
         if (!std::filesystem::is_directory(std::filesystem::path(g_gameRoot) / "C", ec))
         {
             char msg[900];
             snprintf(msg, sizeof(msg),
-                     "Os arquivos do jogo nao foram encontrados em:\n%s\n\nColoque este executavel dentro da pasta do jogo "
-                     "(a pasta que tem C, E, F, G, S, default.xex...).", g_gameRoot.c_str());
+                     "The game files were not found in:\n%s\n\nPut this executable inside the game folder "
+                     "(the folder that has C, E, F, G, S, default.xex...).", g_gameRoot.c_str());
             return Fatal(msg);
         }
     }
-    fprintf(stderr, "[boot] pasta do jogo: %s\n", g_gameRoot.c_str());
+    fprintf(stderr, "[boot] game folder: %s\n", g_gameRoot.c_str());
     STEP("ParseImage");
     Image image = Image::ParseImage(file.data(), file.size());
     if (image.sections.empty())
     {
-        fprintf(stderr, "XEX invalido (use o default_dec.xex descriptografado)\n");
+        fprintf(stderr, "Invalid XEX (use the decrypted default_dec.xex)\n");
         return 1;
     }
 
-    STEP("reservando 4 GB");
+    STEP("reserving 4 GB");
     if (!g_mem.Init())
     {
-        fprintf(stderr, "Falha ao reservar 4 GB de memoria virtual\n");
+        fprintf(stderr, "Failed to reserve 4 GB of virtual memory\n");
         return 1;
     }
 
-    // Heaps guest, fora da imagem (0x82000000..~0x83125000, incluindo a tabela de funcoes)
+    // Guest heaps, outside the image (0x82000000..~0x83125000, including the function table)
     g_virtualHeap.Init(0x20000000, 0x7E000000);
     g_poolHeap.Init(0x90000000, 0xA0000000);
     g_physicalHeap.Init(0xA0000000, 0xC0000000);
 
-    STEP("mapeando secoes (main.cpp v6)");
+    STEP("mapping sections (main.cpp v6)");
     fprintf(stderr, "[boot] image.base=0x%zX image.size=0x%X PPC_IMAGE_SIZE=0x%llX\n", image.base, image.size, (unsigned long long)PPC_IMAGE_SIZE);
-    // Mapeia as secoes
+    // Map the sections
     const uint32_t imageEnd = uint32_t(PPC_IMAGE_BASE + PPC_IMAGE_SIZE);
     g_mem.Commit(uint32_t(PPC_IMAGE_BASE), uint32_t(PPC_IMAGE_SIZE));
     for (const auto& s : image.sections)
-        fprintf(stderr, "[boot] secao %-8s base=0x%08zX tam=0x%X\n", s.name.c_str(), s.base, s.size);
+        fprintf(stderr, "[boot] section %-8s base=0x%08zX size=0x%X\n", s.name.c_str(), s.base, s.size);
     for (const auto& s : image.sections)
     {
-        // limita ao tamanho real da imagem (secoes como .reloc podem passar do fim)
+        // clamp to the real image size (sections such as .reloc can go past the end)
         if (s.base < PPC_IMAGE_BASE || s.base >= imageEnd)
             continue;
-        if (s.name.compare(0, 6, ".reloc") == 0) // so relocacoes do PE; o buffer do XEX acaba antes do fim declarado
+        if (s.name.compare(0, 6, ".reloc") == 0) // PE relocations only; the XEX buffer ends before the declared end
             continue;
         uint64_t size = s.size;
         if (s.base + size > imageEnd)
             size = imageEnd - s.base;
-        fprintf(stderr, "[boot] copiando 0x%08zX + 0x%llX\n", s.base, (unsigned long long)size);
+        fprintf(stderr, "[boot] copying 0x%08zX + 0x%llX\n", s.base, (unsigned long long)size);
         memcpy(g_mem.base + s.base, s.data, size);
     }
 
-    STEP("tabela de funcoes");
-    // Tabela de funcoes: um ponteiro de 8 bytes por instrucao guest
+    STEP("function table");
+    // Function table: one 8-byte pointer per guest instruction
     g_mem.Commit(imageEnd, uint32_t(PPC_CODE_SIZE * 2));
     size_t count = 0;
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
@@ -378,14 +378,14 @@ int main(int argc, char** argv)
             count++;
         }
     }
-    printf("[boot] imagem 0x%08X, %zu funcoes registradas, entry 0x%08X\n",
+    printf("[boot] image 0x%08X, %zu functions registered, entry 0x%08X\n",
            uint32_t(PPC_IMAGE_BASE), count, uint32_t(image.entry_point));
     fflush(stdout);
 
     std::thread(MonitorThread).detach();
     extern void HostThreadUsageStart();
     HostThreadUsageStart();
-    atexit([] { SessionLogEnd("processo encerrado"); });
+    atexit([] { SessionLogEnd("process exited"); });
     if (getenv("CARS_SAMPLE"))
     {
         extern void KStartSamplingProfiler();
@@ -396,7 +396,7 @@ int main(int argc, char** argv)
     if (profile)
         D3DProfileStart();
     extern void XmaInit();
-    XmaInit();   // tabela de contextos XMA + registradores (o XAudio2 do jogo le no boot)
+    XmaInit();   // XMA context table + registers (the game's XAudio2 reads them at boot)
     if (const char* trap = getenv("CARS_TRAP"))
     {
         char* end = nullptr;
@@ -404,18 +404,18 @@ int main(int argc, char** argv)
         const uint32_t n = (end && *end == ',') ? uint32_t(strtoul(end + 1, nullptr, 16)) : 0x1000;
         g_trapPhys = (a & 0x1FFFFFFF) & ~0xFFFu;
         const uint32_t size = (n + 0xFFF) & ~0xFFFu;
-        // CARS_TRAP_DELAY=ms: arma depois desse tempo (pula os acessos do boot)
+        // CARS_TRAP_DELAY=ms: arm after this delay (skips the boot accesses)
         const int delay = getenv("CARS_TRAP_DELAY") ? atoi(getenv("CARS_TRAP_DELAY")) : 0;
         std::thread([size, delay] {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             g_trapSize = size;
             SetTrapProtection(PAGE_NOACCESS);
-            fprintf(stderr, "[trap] protegendo fisico %08X + %X\n", g_trapPhys, g_trapSize);
+            fprintf(stderr, "[trap] protecting physical %08X + %X\n", g_trapPhys, g_trapSize);
         }).detach();
     }
-    STEP("iniciando _xstart");
+    STEP("starting _xstart");
     RunGuestMain(_xstart, 0x40000);
-    printf("[boot] _xstart retornou\n");
-    SessionLogEnd("_xstart retornou");
+    printf("[boot] _xstart returned\n");
+    SessionLogEnd("_xstart returned");
     return 0;
 }

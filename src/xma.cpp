@@ -1,13 +1,13 @@
-// Decodificador XMA do Xbox 360 (o hardware que o XAudio2 do jogo usa para musica e efeitos), com o decodificador xma2
-// do FFmpeg (libavcodec oficial). Baseado no XmaDecoder/XmaContext do Xenia, mas decodificando pacotes inteiros de 2 KB.
+// Xbox 360 XMA decoder (the hardware the game's XAudio2 uses for music and effects), using FFmpeg's xma2 decoder
+// (official libavcodec). Based on Xenia's XmaDecoder/XmaContext, but decoding whole 2 KB packets.
 //
-// Protocolo deste jogo (XAudio2 estatico, 0x822D5120..0x822D5710):
-// - le o endereco fisico da tabela de contextos em 0x7FEA1800 (lwbrx: little-endian) e o "contexto em processamento"
-//   em 0x7FEA1818 (mantido em 0: nunca coincide com um contexto alocado, entao o lock do jogo sempre passa);
-// - XMACreateContext/XMAReleaseContext alocam contextos de 64 bytes (XMA_CONTEXT_DATA, big-endian);
-// - o jogo copia o contexto para uma copia de trabalho (lock), mexe nela e devolve + escreve o bit de "kick"
-//   (sub_822D55E8). No kick decodificamos na hora, como o Xenia faz (o jogo espera o resultado na volta).
-// Saida: PCM 16 bits big-endian, estereo intercalado, num anel de blocos de 256 bytes.
+// This game's protocol (static XAudio2, 0x822D5120..0x822D5710):
+// - reads the physical address of the context table at 0x7FEA1800 (lwbrx: little-endian) and the "context being processed"
+//   at 0x7FEA1818 (kept at 0: never matches an allocated context, so the game's lock always succeeds);
+// - XMACreateContext/XMAReleaseContext allocate 64-byte contexts (XMA_CONTEXT_DATA, big-endian);
+// - the game copies the context into a working copy (lock), changes it and returns it + writes the "kick" bit
+//   (sub_822D55E8). On the kick we decode right away, like Xenia does (the game expects the result on return).
+// Output: 16-bit big-endian PCM, interleaved stereo, in a ring of 256-byte blocks.
 #include "kernel.h"
 
 #include <algorithm>
@@ -34,7 +34,7 @@ constexpr uint32_t kBitsPerPacketHeader = 32;
 constexpr uint32_t kOutputBlock = 256;
 const int kSampleRates[4] = { 24000, 32000, 44100, 48000 };
 
-// XMA_CONTEXT_DATA (Xenia), carregado com swap de 32 bits para usar os bitfields
+// XMA_CONTEXT_DATA (Xenia), loaded with a 32-bit swap to use the bitfields
 struct ContextData
 {
     // DWORD 0
@@ -89,7 +89,7 @@ struct ContextData
     void Store(uint32_t guest) const
     {
         auto* d = reinterpret_cast<const uint32_t*>(this);
-        for (int i = 0; i < 10; i++)   // os dwords 10..15 sao do jogo
+        for (int i = 0; i < 10; i++)   // dwords 10..15 belong to the game
             W32(guest + i * 4, d[i]);
     }
     bool BufferValid(uint32_t b) const { return b ? input_buffer_1_valid : input_buffer_0_valid; }
@@ -103,7 +103,7 @@ struct ContextData
             input_buffer_0_valid = 0;
     }
 };
-static_assert(sizeof(ContextData) == 64, "XMA_CONTEXT_DATA tem 64 bytes");
+static_assert(sizeof(ContextData) == 64, "XMA_CONTEXT_DATA is 64 bytes");
 
 struct HostContext
 {
@@ -113,13 +113,13 @@ struct HostContext
     AVPacket* packet = nullptr;
     AVFrame* frame = nullptr;
     int rate = 0, channels = 0;
-    std::vector<uint8_t> pending;   // PCM ja decodificado (16 bits BE intercalado) que ainda nao coube na saida
+    std::vector<uint8_t> pending;   // already decoded PCM (16-bit BE interleaved) that did not fit in the output yet
     size_t pendingPos = 0;
-    // ultimo estado de entrada que escrevemos: se o jogo mudar (som novo), o decodificador recomeca
+    // last input state we wrote: if the game changes it (new sound), the decoder restarts
     uint32_t lastReadOffset = ~0u, lastBuffer = ~0u, lastPtr0 = 0, lastPtr1 = 0;
 };
 
-uint32_t g_contextArray = 0;   // endereco guest (fisico 0xA0000000+) da tabela de contextos
+uint32_t g_contextArray = 0;   // guest address (physical 0xA0000000+) of the context table
 HostContext g_hosts[kContextCount];
 std::mutex g_allocMutex;
 bool g_ready = false;
@@ -146,7 +146,7 @@ bool PrepareDecoder(HostContext& h, int rate, int channels)
     h.av->sample_rate = rate;
     av_channel_layout_default(&h.av->ch_layout, channels);
     h.av->block_align = kBytesPerPacket;
-    // XMA2WAVEFORMATEX (parte extra, 34 bytes): 1 stream, canais = os do contexto
+    // XMA2WAVEFORMATEX (extra part, 34 bytes): 1 stream, channels = those of the context
     h.av->extradata = static_cast<uint8_t*>(av_mallocz(34 + AV_INPUT_BUFFER_PADDING_SIZE));
     h.av->extradata_size = 34;
     h.av->extradata[0] = 1;   // NumStreams (LE16)
@@ -169,7 +169,7 @@ bool PrepareDecoder(HostContext& h, int rate, int channels)
     return true;
 }
 
-// Float planar -> 16 bits big-endian intercalado
+// Planar float -> interleaved 16-bit big-endian
 void AppendFrame(HostContext& h, const AVFrame* f)
 {
     const int ch = std::min(h.channels, f->ch_layout.nb_channels);
@@ -186,7 +186,7 @@ void AppendFrame(HostContext& h, const AVFrame* f)
         }
 }
 
-// Decodifica o proximo pacote do buffer de entrada atual. false = sem entrada.
+// Decodes the next packet of the current input buffer. false = no input.
 bool DecodeNextPacket(HostContext& h, ContextData& d)
 {
     for (int tries = 0; tries < 2; tries++)
@@ -196,7 +196,7 @@ bool DecodeNextPacket(HostContext& h, ContextData& d)
         {
             if (!d.BufferValid(b ^ 1))
                 return false;
-            d.current_buffer = b ^ 1;   // o outro buffer esta pronto
+            d.current_buffer = b ^ 1;   // the other buffer is ready
             d.input_buffer_read_offset = kBitsPerPacketHeader;
             continue;
         }
@@ -219,14 +219,14 @@ bool DecodeNextPacket(HostContext& h, ContextData& d)
                     AppendFrame(h, h.frame);
         }
         g_statPackets++;
-        // proximo pacote; fim do buffer -> libera para o jogo e passa para o outro
+        // next packet; end of buffer -> release it to the game and switch to the other one
         uint32_t next = (index + 1) * kBitsPerPacket + kBitsPerPacketHeader;
-        // Loop (aproximado por pacote): ao passar do fim do trecho volta para o pacote do inicio
+        // Loop (approximated per packet): when passing the end of the loop region, go back to its first packet
         if (d.loop_count && d.loop_end > d.loop_start && d.loop_end <= (index + 1) * kBitsPerPacket &&
             d.loop_end > index * kBitsPerPacket)
         {
             next = d.loop_start;
-            avcodec_flush_buffers(h.av);   // descontinuidade: o proximo pacote comeca do zero
+            avcodec_flush_buffers(h.av);   // discontinuity: the next packet starts from scratch
             if (d.loop_count != 255)
                 d.loop_count--;
         }
@@ -257,7 +257,7 @@ void Work(uint32_t guest)
         return;
     if (!PrepareDecoder(h, kSampleRates[d.sample_rate], d.is_stereo ? 2 : 1))
         return;
-    // Som novo (o jogo mexeu na posicao de leitura ou nos buffers): recomeca o decodificador
+    // New sound (the game moved the read position or the buffers): restart the decoder
     if (d.input_buffer_read_offset != h.lastReadOffset || d.current_buffer != h.lastBuffer ||
         (d.input_buffer_0_ptr != h.lastPtr0 && d.input_buffer_0_valid && d.current_buffer == 0) ||
         (d.input_buffer_1_ptr != h.lastPtr1 && d.input_buffer_1_valid && d.current_buffer == 1))
@@ -272,7 +272,7 @@ void Work(uint32_t guest)
     {
         if (h.pending.size() - h.pendingPos < kOutputBlock)
         {
-            // compacta o que sobrou e decodifica mais um pacote
+            // compact what is left and decode one more packet
             h.pending.erase(h.pending.begin(), h.pending.begin() + ptrdiff_t(h.pendingPos));
             h.pendingPos = 0;
             if (!DecodeNextPacket(h, d))
@@ -287,7 +287,7 @@ void Work(uint32_t guest)
     }
     d.output_buffer_write_offset = write / kOutputBlock;
     if (space < kOutputBlock)
-        d.output_buffer_valid = 0;   // saida cheia: o jogo libera espaco e liga de novo
+        d.output_buffer_valid = 0;   // output full: the game frees space and enables it again
     d.error_status = 0;
     d.error_set = 0;
     d.Store(guest);
@@ -302,13 +302,13 @@ void XmaInit()
 {
     g_contextArray = g_physicalHeap.Alloc(kContextCount * 64, 0x1000);
     g_mem.Commit(kMmioBase, 0x10000);
-    // ContextArrayAddress (0x7FEA1800) e lido com lwbrx: valor fisico em little-endian
+    // ContextArrayAddress (0x7FEA1800) is read with lwbrx: physical value in little-endian
     *reinterpret_cast<uint32_t*>(g_mem.base + kMmioBase + 0x1800) = g_contextArray & 0x1FFFFFFF;
     *reinterpret_cast<uint32_t*>(g_mem.base + kMmioBase + 0x1818) = 0;   // CurrentContextIndex
     g_ready = avcodec_find_decoder(AV_CODEC_ID_XMA2) != nullptr;
-    av_log_set_level(AV_LOG_ERROR);   // os avisos do xma2 ("Could not update timestamps for skipped samples") so enchiam o log
-    fprintf(stderr, "[xma] %u contextos em %08X, decodificador xma2 do FFmpeg %s\n", kContextCount, g_contextArray,
-            g_ready ? "ok" : "AUSENTE (sem audio XMA)");
+    av_log_set_level(AV_LOG_ERROR);   // xma2 warnings ("Could not update timestamps for skipped samples") only flooded the log
+    fprintf(stderr, "[xma] %u contexts at %08X, FFmpeg xma2 decoder %s\n", kContextCount, g_contextArray,
+            g_ready ? "ok" : "MISSING (no XMA audio)");
 }
 
 void XmaTakeStats(uint64_t& packets, uint64_t& blocks)
@@ -317,11 +317,11 @@ void XmaTakeStats(uint64_t& packets, uint64_t& blocks)
     blocks = g_statBlocks.exchange(0);
 }
 
-// (ponteiro de saida para o contexto)
+// (output pointer for the context)
 KERNEL_IMPORT(XMACreateContext)
 {
     std::lock_guard<std::mutex> lock(g_allocMutex);
-    for (uint32_t i = 1; i < kContextCount; i++)   // o 0 fica livre (CurrentContextIndex)
+    for (uint32_t i = 1; i < kContextCount; i++)   // 0 stays free (CurrentContextIndex)
     {
         HostContext& h = g_hosts[i];
         std::lock_guard<std::mutex> hl(h.mutex);
@@ -354,8 +354,8 @@ KERNEL_IMPORT(XMAReleaseContext)
     ctx.r3.u64 = 0;
 }
 
-// Kick dos contextos de uma voz (estrutura: +0 numero de contextos, +8 registros de 96 bytes com o ponteiro do contexto
-// em +64): o original devolve a copia de trabalho e escreve os bits de kick; depois decodificamos cada contexto
+// Kick of a voice's contexts (structure: +0 number of contexts, +8 records of 96 bytes with the context pointer
+// at +64): the original returns the working copy and writes the kick bits; then we decode each context
 extern "C" PPC_FUNC(__imp__sub_822D55E8);
 PPC_FUNC(sub_822D55E8)
 {

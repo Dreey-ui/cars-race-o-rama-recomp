@@ -1,14 +1,15 @@
-# Textos do jogo sem "Xbox 360": console -> computador (na lingua de cada idioma), controle sem a marca.
-# Le <jogo>\<L>\Loc\<L>_L_*.bin (u32 tamanho em bytes do bloco de texto, BOM FF FE, textos UTF-16LE terminados em zero,
-# depois bytes de atributos de cada texto, mantidos) e grava a versao trocada em <jogo>\mods\<L>\Loc\ (o original fica).
-# Uso: python -I tools/textos_pc.py [--jogo "<pasta do jogo>"] [--desfazer]
+# Game texts without "Xbox 360": console -> computer (in each language), controller without the brand.
+# Reads <game>\<L>\Loc\<L>_L_*.bin (u32 byte size of the text block, BOM FF FE, NUL-terminated UTF-16LE strings,
+# then each string's attribute bytes, kept as they are) and writes the changed version to <game>\mods\<L>\Loc\
+# (the original stays untouched).
+# Usage: python -I tools/pc_texts.py [--game "<game folder>"] [--undo]
 import argparse
 import os
 import struct
 import sys
 
 FILES = ('L_TRC_X360', 'L_CarsFrontEndUI')
-# (de, para) por idioma; so aplicado nos textos que falam de Xbox ou de console (ordem: frases mais longas primeiro)
+# (from, to) per language; only applied to strings that mention Xbox or the console (order: longer phrases first)
 RULES = {
     'E': [('your Xbox 360 console', 'your computer'), ('the Xbox 360 controller', 'the controller'),
           ('XBOX 360 CONTROLLER SETTINGS', 'CONTROLLER SETTINGS')],
@@ -34,7 +35,7 @@ RULES = {
 def convert(data, rules):
     n = struct.unpack_from('<I', data, 0)[0]
     if data[4:6] != b'\xff\xfe' or 4 + n > len(data):
-        raise ValueError('formato inesperado')
+        raise ValueError('unexpected format')
     texts = data[6:4 + n].decode('utf-16-le').split('\0')
     changed = []
     for k, t in enumerate(texts):
@@ -44,7 +45,7 @@ def convert(data, rules):
         for a, b in rules:
             new = new.replace(a, b)
         if any(w in new.lower() for w in ('xbox', 'consol', 'konsol')):
-            raise ValueError('texto %d ainda fala de Xbox/console: %r' % (k, new))
+            raise ValueError('string %d still mentions Xbox/console: %r' % (k, new))
         texts[k] = new
         changed.append((t, new))
     body = b'\xff\xfe' + '\0'.join(texts).encode('utf-16-le')
@@ -54,24 +55,24 @@ def convert(data, rules):
 def main():
     sys.stdout.reconfigure(encoding='utf-8')
     ap = argparse.ArgumentParser()
-    ap.add_argument('--jogo', default=r'C:\Games\Cars Race-O-Rama Recomp')
-    ap.add_argument('--desfazer', action='store_true', help='apaga os textos trocados dos mods')
+    ap.add_argument('--game', default=r'C:\Games\Cars Race-O-Rama Recomp')
+    ap.add_argument('--undo', action='store_true', help='deletes the changed texts from mods')
     a = ap.parse_args()
     for lang, rules in RULES.items():
         for name in FILES:
             rel = os.path.join(lang, 'Loc', '%s_%s.bin' % (lang, name))
-            src = os.path.join(a.jogo, rel)
-            dst = os.path.join(a.jogo, 'mods', rel)
-            if a.desfazer:
+            src = os.path.join(a.game, rel)
+            dst = os.path.join(a.game, 'mods', rel)
+            if a.undo:
                 if os.path.exists(dst):
                     os.remove(dst)
-                    print('removido', dst)
+                    print('removed', dst)
                 continue
             out, changed = convert(open(src, 'rb').read(), rules)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(dst, 'wb') as f:
                 f.write(out)
-            print('%s: %d texto(s)' % (rel, len(changed)))
+            print('%s: %d string(s)' % (rel, len(changed)))
             for old, new in changed:
                 print('   %s\n -> %s' % (old.replace('\r\n', ' '), new.replace('\r\n', ' ')))
 

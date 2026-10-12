@@ -1,4 +1,4 @@
-// Leitura de texturas guest: untiling 2D do Xenos (texture_address.h do Xenia), endian e conversao de formato.
+// Reading guest textures: Xenos 2D untiling (Xenia's texture_address.h), endian and format conversion.
 #include "textures.h"
 #include "xenos_regs.h"
 #include "runtime.h"
@@ -58,7 +58,7 @@ enum class Conv { Copy, R5G6B5, R6G5B5, A1R5G5B5, A4R4G4B4, Depth24, Dxt3A, Yuv4
 struct FormatInfo
 {
     uint32_t xenos;
-    uint32_t blockSize;      // 1 ou 4 (BC)
+    uint32_t blockSize;      // 1 or 4 (BC)
     uint32_t bytesPerBlock;
     DXGI_FORMAT host;
     uint32_t hostBytesPerBlock;
@@ -84,14 +84,14 @@ static const FormatInfo kFormats[] = {
     { 19, 4, 16, DXGI_FORMAT_BC2_UNORM,            16, Conv::Copy, 4 },      // k_DXT2_3
     { 20, 4, 16, DXGI_FORMAT_BC3_UNORM,            16, Conv::Copy, 4 },      // k_DXT4_5
     { 22, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Depth24, 1 },   // k_24_8
-    { 23, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Depth24, 1 },   // k_24_8_FLOAT (aproximado)
+    { 23, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Depth24, 1 },   // k_24_8_FLOAT (approximate)
     { 24, 1, 2,  DXGI_FORMAT_R16_UNORM,            2,  Conv::Copy, 1 },      // k_16
     { 25, 1, 4,  DXGI_FORMAT_R16G16_UNORM,         4,  Conv::Copy, 2 },      // k_16_16
     { 26, 1, 8,  DXGI_FORMAT_R16G16B16A16_UNORM,   8,  Conv::Copy, 4 },      // k_16_16_16_16
     { 30, 1, 2,  DXGI_FORMAT_R16_FLOAT,            2,  Conv::Copy, 1 },      // k_16_FLOAT
     { 31, 1, 4,  DXGI_FORMAT_R16G16_FLOAT,         4,  Conv::Copy, 2 },      // k_16_16_FLOAT
     { 32, 1, 8,  DXGI_FORMAT_R16G16B16A16_FLOAT,   8,  Conv::Copy, 4 },      // k_16_16_16_16_FLOAT
-    { 33, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Copy, 1 },      // k_32 (tratado como float)
+    { 33, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Copy, 1 },      // k_32 (treated as float)
     { 36, 1, 4,  DXGI_FORMAT_R32_FLOAT,            4,  Conv::Copy, 1 },      // k_32_FLOAT
     { 37, 1, 8,  DXGI_FORMAT_R32G32_FLOAT,         8,  Conv::Copy, 2 },      // k_32_32_FLOAT
     { 38, 1, 16, DXGI_FORMAT_R32G32B32A32_FLOAT,   16, Conv::Copy, 4 },      // k_32_32_32_32_FLOAT
@@ -101,7 +101,7 @@ static const FormatInfo kFormats[] = {
     { 52, 4, 16, DXGI_FORMAT_BC2_UNORM,            16, Conv::Copy, 4 },
     { 53, 4, 16, DXGI_FORMAT_BC3_UNORM,            16, Conv::Copy, 4 },
     { 54, 1, 4,  DXGI_FORMAT_R10G10B10A2_UNORM,    4,  Conv::Copy, 4 },
-    { 58, 4, 8,  DXGI_FORMAT_R8_UNORM,             16, Conv::Dxt3A, 1 },     // k_DXT3A -> R8 (descomprimido)
+    { 58, 4, 8,  DXGI_FORMAT_R8_UNORM,             16, Conv::Dxt3A, 1 },     // k_DXT3A -> R8 (decompressed)
     { 59, 4, 8,  DXGI_FORMAT_BC4_UNORM,            8,  Conv::Copy, 1 },      // k_DXT5A
     { 62, 1, 4,  DXGI_FORMAT_R8G8B8A8_UNORM,       4,  Conv::Copy, 4 },      // k_8_8_8_8_GAMMA_EDRAM
 };
@@ -124,7 +124,7 @@ bool HostFormatForTexture(uint32_t xenosFormat, DXGI_FORMAT& fmt, uint32_t& comp
     return true;
 }
 
-// ---- tiling 2D (texture_address.h do Xenia) ----
+// ---- 2D tiling (Xenia's texture_address.h) ----
 static int32_t TiledCombine(int32_t outerInnerBytes, uint32_t bank, uint32_t pipe, uint32_t yLsb)
 {
     return int32_t((yLsb << 4) | (pipe << 6) | (bank << 11)) | (outerInnerBytes & 0b1111) |
@@ -152,9 +152,9 @@ static uint32_t AlignUp(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 struct Layout
 {
     uint32_t blocksX, blocksY;
-    uint32_t pitchBlocks;     // alinhado a 32 blocos
+    uint32_t pitchBlocks;     // aligned to 32 blocks
     uint32_t rowPitchBytes;   // linear
-    uint32_t extent;          // bytes guest
+    uint32_t extent;          // guest bytes
 };
 
 static Layout ComputeLayout(const TextureFetch& f, const FormatInfo& fi)
@@ -176,10 +176,10 @@ static Layout ComputeLayout(const TextureFetch& f, const FormatInfo& fi)
     return l;
 }
 
-// Quantos bytes a partir de addr estao commitados (evita ler alem do que o jogo alocou)
+// How many bytes from addr are committed (avoids reading past what the game allocated)
 static uint32_t ReadableBytes(uint32_t addr, uint32_t len)
 {
-    // Memoria fisica (0xA0000000+): sempre commitada (secao). VirtualQuery nessas views de 512 MB e caro.
+    // Physical memory (0xA0000000+): always committed (section). VirtualQuery on these 512 MB views is expensive.
     if (addr >= 0xA0000000u)
     {
         const uint64_t windowEnd = (uint64_t(addr) & ~0x1FFFFFFFull) + 0x20000000ull;
@@ -250,7 +250,7 @@ static void YuvToRgb(int y, int u, int v, uint8_t* out)
     out[3] = 255;
 }
 
-// Converte um bloco guest (ja com endian corrigido) para o formato do host
+// Converts a guest block (endian already fixed) to the host format
 static void ConvertBlock(const FormatInfo& fi, const uint8_t* src, uint8_t* dst)
 {
     switch (fi.conv)
@@ -290,16 +290,16 @@ static void ConvertBlock(const FormatInfo& fi, const uint8_t* src, uint8_t* dst)
         memcpy(dst, &d, 4);
         break;
     }
-    case Conv::Yuv422Gbgr:   // Y1 Cr Y0 Cb (bytes do LSB: Cb Y0 Cr Y1)
+    case Conv::Yuv422Gbgr:   // Y1 Cr Y0 Cb (bytes from the LSB: Cb Y0 Cr Y1)
         YuvToRgb(src[1], src[0], src[2], dst);
         YuvToRgb(src[3], src[0], src[2], dst + 4);
         break;
-    case Conv::Yuv422Bgrg:   // Cr Y1 Cb Y0 (bytes do LSB: Y0 Cb Y1 Cr)
+    case Conv::Yuv422Bgrg:   // Cr Y1 Cb Y0 (bytes from the LSB: Y0 Cb Y1 Cr)
         YuvToRgb(src[0], src[1], src[3], dst);
         YuvToRgb(src[2], src[1], src[3], dst + 4);
         break;
     case Conv::Dxt3A:
-        // 4x4 blocos de alfa de 4 bits -> 16 bytes (linhas do bloco escritas pelo chamador)
+        // 4x4 blocks of 4-bit alpha -> 16 bytes (block rows written by the caller)
         for (int i = 0; i < 16; i++)
         {
             const uint8_t nib = (src[i / 2] >> ((i & 1) * 4)) & 15;
@@ -315,7 +315,7 @@ bool PrepareGuestTexture2D(const TextureFetch& f, HostTextureData& out)
     if (!fi)
         return false;
     const Layout l = ComputeLayout(f, *fi);
-    // YUV 4:2:2: cada bloco guest de 32 bits vira 2 pixels
+    // YUV 4:2:2: each 32-bit guest block becomes 2 pixels
     const bool yuv = fi->conv == Conv::Yuv422Gbgr || fi->conv == Conv::Yuv422Bgrg;
     const bool dxt3a = fi->conv == Conv::Dxt3A;
 
@@ -348,8 +348,8 @@ void DecodeGuestTexture2D(const TextureFetch& f, const HostTextureData& meta, ui
     const uint32_t bppLog2 = Log2(fi->bytesPerBlock);
     const bool dxt3a = fi->conv == Conv::Dxt3A;
 
-    // O swap de endian da GPU e sobre palavras da memoria: equivale a um XOR no endereco de cada byte
-    // (dentro de grupos de 4 bytes -> um pshufb por bloco de 16 bytes)
+    // The GPU endian swap works on memory words: it is equivalent to an XOR on each byte's address
+    // (within groups of 4 bytes -> one pshufb per 16-byte block)
     static const uint32_t kByteXor[4] = { 0, 1, 3, 2 };
     const uint32_t bx0 = kByteXor[f.endian & 3];
     alignas(16) uint8_t maskBytes[16];
@@ -357,7 +357,7 @@ void DecodeGuestTexture2D(const TextureFetch& f, const HostTextureData& meta, ui
         maskBytes[i] = uint8_t(i ^ bx0);
     const __m128i mask = _mm_load_si128(reinterpret_cast<const __m128i*>(maskBytes));
 
-    // No tiling 2D, 16 bytes seguidos (8 para formatos de 1 byte) de blocos consecutivos em x sao contiguos e alinhados
+    // In 2D tiling, 16 consecutive bytes (8 for 1-byte formats) of consecutive blocks in x are contiguous and aligned
     const uint32_t bpb = fi->bytesPerBlock;
     const uint32_t runBytes = std::min(16u, 8u << bppLog2);
     const uint32_t perRun = runBytes / bpb;
@@ -387,7 +387,7 @@ void DecodeGuestTexture2D(const TextureFetch& f, const HostTextureData& meta, ui
             }
             if (fi->conv == Conv::Copy)
             {
-                // a linha do destino e alinhada a 256 bytes: o bloco de 16 bytes inteiro cabe
+                // the destination row is aligned to 256 bytes: the whole 16-byte block fits
                 memcpy(dstRow + bx * bpb, run, runBytes);
                 continue;
             }

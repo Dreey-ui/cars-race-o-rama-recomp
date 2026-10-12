@@ -1,5 +1,5 @@
-// Gerado: stubs fracos (com log) para todos os imports do kernel/XAM.
-// Uma implementacao forte em outro arquivo (KERNEL_IMPORT) substitui o stub.
+// Generated: weak stubs (with logging) for every kernel/XAM import.
+// A strong implementation in another file (KERNEL_IMPORT) replaces the stub.
 #include "runtime.h"
 
 void LogUnimplementedImport(const char* name, PPCContext& ctx);

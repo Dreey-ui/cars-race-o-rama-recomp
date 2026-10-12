@@ -1,7 +1,7 @@
-// Backend D3D12 para a GPU Xenos.
-// Estado: registradores do processador de comandos PM4 (como o hardware ve). Shaders: XenosRecomp -> DXIL.
-// Render targets: uma textura do host por (base na EDRAM, pitch, formato). Resolve: copia o RT para uma textura
-// do host associada ao endereco de destino; texturas amostradas nesse endereco usam a copia do host.
+// D3D12 backend for the Xenos GPU.
+// State: registers of the PM4 command processor (as the hardware sees them). Shaders: XenosRecomp -> DXIL.
+// Render targets: one host texture per (EDRAM base, pitch, format). Resolve: copies the RT into a host texture
+// associated with the destination address; textures sampled at that address use the host copy.
 #include "renderer.h"
 #include "shaders.h"
 #include "textures.h"
@@ -43,11 +43,11 @@ static constexpr uint32_t kSrvHeapSize = 65536;
 static constexpr uint32_t kSamplerHeapSize = 2048;
 static constexpr uint32_t kRtvHeapSize = 1024;
 static constexpr uint32_t kDsvHeapSize = 256;
-static constexpr uint32_t kRtHeight = 1024;   // a EDRAM nao tem altura; RTs do host tem altura fixa
+static constexpr uint32_t kRtHeight = 1024;   // EDRAM has no height; host RTs have a fixed height
 static constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 // ---------------------------------------------------------------------------------------------
-// Estado global
+// Global state
 
 static HWND g_hwnd = nullptr;
 static std::atomic<bool> g_resizePending{ false };
@@ -56,12 +56,12 @@ static bool g_enabled = false;
 static bool g_logDraws = false;
 static uint32_t* g_regs = nullptr;
 static std::vector<uint64_t> g_dumpFrames;   // CARS_DUMP_FRAMES
-static uint64_t g_traceFrame = 0;             // CARS_TRACE_FRAME: registra todos os draws/resolves deste frame
-static FILE* g_traceOut = nullptr;            // F12: o trace vai para marca_NN\frame.txt (senao para o log)
-static std::filesystem::path g_captureDir;    // F12: pasta dos dumps do frame registrado (vazio = pasta atual)
+static uint64_t g_traceFrame = 0;             // CARS_TRACE_FRAME: records every draw/resolve of this frame
+static FILE* g_traceOut = nullptr;            // F12: the trace goes to mark_NN\frame.txt (otherwise to the log)
+static std::filesystem::path g_captureDir;    // F12: folder for the dumps of the recorded frame (empty = current folder)
 static FILE* TraceOut() { return g_traceOut ? g_traceOut : stderr; }
 static std::filesystem::path CapturePath(const char* name) { return g_captureDir.empty() ? std::filesystem::path(name) : g_captureDir / name; }
-static std::atomic<uint64_t> g_lastSwapTick{ 0 };   // GetTickCount64 do ultimo swap (detector de travada em main.cpp)
+static std::atomic<uint64_t> g_lastSwapTick{ 0 };   // GetTickCount64 of the last swap (hang detector in main.cpp)
 
 static ComPtr<ID3D12Device> g_device;
 static ComPtr<ID3D12CommandQueue> g_queue;
@@ -87,7 +87,7 @@ static uint64_t g_frameNumber = 1;
 
 static ComPtr<ID3D12DescriptorHeap> g_srvHeap, g_samplerHeap, g_rtvHeap, g_dsvHeap;
 static uint32_t g_srvSize = 0, g_samplerSize = 0, g_rtvSize = 0, g_dsvSize = 0;
-static uint32_t g_srvNext = 3, g_samplerNext = 1, g_rtvNext = 1, g_dsvNext = 0;   // srv 0..2 = texturas padrao; rtv 0 = nulo
+static uint32_t g_srvNext = 3, g_samplerNext = 1, g_rtvNext = 1, g_dsvNext = 0;   // srv 0..2 = default textures; rtv 0 = null
 
 static ComPtr<ID3D12RootSignature> g_rootSig, g_blitRootSig;
 static ComPtr<ID3D12PipelineState> g_blitPso;
@@ -114,7 +114,7 @@ struct ScopedMs
 };
 
 // ---------------------------------------------------------------------------------------------
-// Janela
+// Window
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -122,20 +122,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_CLOSE:
         if (getenv("CARS_HIDDEN_WINDOW"))
-            return 0;   // janela de teste automatico: encerrada pelo script
-        fprintf(stderr, "[janela] fechada pelo usuario\n");
-        ModelCaptureFinish();   // captura de modelos ligada: salva o que ja foi visto
-        SessionLogEnd("janela fechada pelo usuario");
+            return 0;   // automatic test window: closed by the script
+        fprintf(stderr, "[window] closed by the user\n");
+        ModelCaptureFinish();   // model capture on: save what has been seen so far
+        SessionLogEnd("window closed by the user");
         ExitProcess(0);
     case WM_ACTIVATEAPP:
-        fprintf(stderr, "[janela] %s\n", wp ? "jogo em foco" : "jogo perdeu o foco (outra janela na frente)");
+        fprintf(stderr, "[window] %s\n", wp ? "game focused" : "game lost focus (another window in front)");
         break;
     case WM_SIZE:
     {
         g_resizePending = true;
         static WPARAM lastType = SIZE_RESTORED;
         if (wp != lastType && (wp == SIZE_MINIMIZED || wp == SIZE_MAXIMIZED || wp == SIZE_RESTORED))
-            fprintf(stderr, "[janela] %s (%ux%u)\n", wp == SIZE_MINIMIZED ? "minimizada" : wp == SIZE_MAXIMIZED ? "maximizada" : "restaurada",
+            fprintf(stderr, "[window] %s (%ux%u)\n", wp == SIZE_MINIMIZED ? "minimized" : wp == SIZE_MAXIMIZED ? "maximized" : "restored",
                     unsigned(LOWORD(lp)), unsigned(HIWORD(lp)));
         lastType = wp;
         return 0;
@@ -146,7 +146,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
         GetClientRect(hwnd, &rc);
         if (rc.right != last.right || rc.bottom != last.bottom)
-            fprintf(stderr, "[janela] tamanho %ldx%ld\n", rc.right, rc.bottom);
+            fprintf(stderr, "[window] size %ldx%ld\n", rc.right, rc.bottom);
         last = rc;
         break;
     }
@@ -170,7 +170,7 @@ static void WindowThread(std::promise<HWND>* ready)
                                 CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
                                 nullptr, nullptr, wc.hInstance, nullptr);
     if (hwnd)
-        ShowWindow(hwnd, getenv("CARS_HIDDEN_WINDOW") ? SW_SHOWMINNOACTIVE : SW_SHOW);   // testes automaticos: minimizada
+        ShowWindow(hwnd, getenv("CARS_HIDDEN_WINDOW") ? SW_SHOWMINNOACTIVE : SW_SHOW);   // automatic tests: minimized
     ready->set_value(hwnd);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -181,7 +181,7 @@ static void WindowThread(std::promise<HWND>* ready)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Utilitarios D3D12
+// D3D12 utilities
 
 static D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(ID3D12DescriptorHeap* heap, uint32_t index, uint32_t size)
 {
@@ -205,11 +205,11 @@ static void WaitForFence(uint64_t value)
         while (WaitForSingleObject(g_fenceEvent, 2000) == WAIT_TIMEOUT)
         {
             const HRESULT reason = g_device->GetDeviceRemovedReason();
-            fprintf(stderr, "[gpu] esperando a GPU ha 2 s (fence %llu, completada %llu, device removed reason %08X)\n",
+            fprintf(stderr, "[gpu] waiting for the GPU for 2 s (fence %llu, completed %llu, device removed reason %08X)\n",
                     (unsigned long long)value, (unsigned long long)g_fence->GetCompletedValue(), unsigned(reason));
             if (FAILED(reason))
             {
-                fprintf(stderr, "[gpu] device D3D12 removido: desligando o renderer\n");
+                fprintf(stderr, "[gpu] D3D12 device removed: shutting the renderer down\n");
                 g_enabled = false;
                 return;
             }
@@ -217,7 +217,7 @@ static void WaitForFence(uint64_t value)
     }
 }
 
-// Estado ja aplicado na lista de comandos atual (para nao repetir chamadas iguais a cada draw)
+// State already applied to the current command list (so identical calls are not repeated on every draw)
 struct BoundState
 {
     bool valid = false;
@@ -234,9 +234,9 @@ struct BoundState
 };
 static BoundState g_bound;
 
-// Bancos de constantes ALU escritos desde o ultimo draw (bit 0 VS, bit 1 PS): kernel_gpu.cpp
+// ALU constant banks written since the last draw (bit 0 VS, bit 1 PS): kernel_gpu.cpp
 extern uint32_t g_aluDirty;
-// Copias das constantes no buffer de upload do frame atual (reusadas enquanto o jogo nao escreve nelas)
+// Copies of the constants in the current frame's upload buffer (reused while the game does not write to them)
 static D3D12_GPU_VIRTUAL_ADDRESS g_vsCbCache = 0, g_psCbCache = 0;
 
 static void BeginCommandList()
@@ -247,7 +247,7 @@ static void BeginCommandList()
     ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get(), g_samplerHeap.Get() };
     g_cmd->SetDescriptorHeaps(2, heaps);
     g_bound = BoundState{};
-    // o buffer de upload deste frame recomeca do zero: as copias de constantes antigas nao valem mais
+    // this frame's upload buffer starts from zero again: the old constant copies are no longer valid
     g_vsCbCache = g_psCbCache = 0;
 }
 
@@ -294,8 +294,8 @@ struct HostTexture
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     std::unordered_map<uint32_t, uint32_t> srvBySwizzle;
     uint32_t rtv = UINT32_MAX, dsv = UINT32_MAX;
-    // Textura de resolve com RB_COPY_DEST_INFO.copy_dest_swap: no Xenos o resolve grava com vermelho e azul trocados (e o
-    // swizzle do fetch destroca). Aqui a copia e direta, entao a troca e aplicada no SRV (veja GetSrv)
+    // Resolve texture with RB_COPY_DEST_INFO.copy_dest_swap: on Xenos the resolve writes with red and blue swapped (and the
+    // fetch swizzle swaps them back). Here the copy is direct, so the swap is applied in the SRV (see GetSrv)
     bool rbSwap = false;
 };
 
@@ -360,12 +360,12 @@ static bool CreateTexture2D(HostTexture& t, DXGI_FORMAT fmt, uint32_t w, uint32_
 static uint32_t AllocSrv()
 {
     if (g_srvNext >= kSrvHeapSize)
-        g_srvNext = 3;   // em ultimo caso reaproveita (nao deveria acontecer)
+        g_srvNext = 3;   // as a last resort, reuse (should not happen)
     return g_srvNext++;
 }
 
-// SRV com o swizzle do fetch constant (3 bits por componente: 0..3 = X..W, 4 = 0, 5 = 1)
-// applyRbSwap = false: mapeamento direto (apresentacao do frontbuffer, que o hardware de video le sem o swizzle do fetch)
+// SRV with the fetch constant swizzle (3 bits per component: 0..3 = X..W, 4 = 0, 5 = 1)
+// applyRbSwap = false: direct mapping (frontbuffer presentation, which the video hardware reads without the fetch swizzle)
 static uint32_t GetSrv(HostTexture& t, uint32_t swizzle, bool applyRbSwap = true)
 {
     const bool rb = applyRbSwap && t.rbSwap;
@@ -378,9 +378,9 @@ static uint32_t GetSrv(HostTexture& t, uint32_t swizzle, bool applyRbSwap = true
     {
         uint32_t sel = (swizzle >> (3 * c)) & 7;
         if (rb && (sel == 0 || sel == 2))
-            sel ^= 2;   // o componente X da memoria (com dest_swap) e o Z do render target, e vice-versa
+            sel ^= 2;   // the X component in memory (with dest_swap) is the render target's Z, and vice versa
         if (sel < 4)
-            map[c] = std::min(sel, t.components - 1);   // componentes ausentes repetem o ultimo
+            map[c] = std::min(sel, t.components - 1);   // missing components repeat the last one
         else if (sel == 5)
             map[c] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1;
         else
@@ -397,7 +397,7 @@ static uint32_t GetSrv(HostTexture& t, uint32_t swizzle, bool applyRbSwap = true
     return index;
 }
 
-// data.data vazio: decodifica a textura guest (fetch) direto no buffer de upload
+// empty data.data: decodes the guest texture (fetch) straight into the upload buffer
 static void UploadTexture2D(HostTexture& t, const HostTextureData& data, const TextureFetch* fetch = nullptr)
 {
     ID3D12Resource* upload = nullptr;
@@ -429,19 +429,19 @@ static void UploadTexture2D(HostTexture& t, const HostTextureData& data, const T
 }
 
 // ---------------------------------------------------------------------------------------------
-// Caches: texturas guest, texturas de resolve, render targets, samplers, PSOs
+// Caches: guest textures, resolve textures, render targets, samplers, PSOs
 
 struct GuestTexEntry
 {
     HostTexture tex;
     uint64_t contentHash = 0;
-    uint64_t quickHash = 0;     // hash por amostragem (checado todo frame)
-    uint64_t lastFullCheck = 0; // hash completo a cada 120 frames
+    uint64_t quickHash = 0;     // sampled hash (checked every frame)
+    uint64_t lastFullCheck = 0; // full hash every 120 frames
     uint64_t lastCheck = 0;
     bool valid = false;
 };
 static std::unordered_map<uint64_t, GuestTexEntry*> g_guestTextures;
-static std::unordered_map<uint32_t, HostTexture*> g_resolved;   // endereco fisico -> copia do resolve
+static std::unordered_map<uint32_t, HostTexture*> g_resolved;   // physical address -> resolve copy
 
 struct RenderTarget
 {
@@ -471,7 +471,7 @@ static DXGI_FORMAT DepthRtFormat(uint32_t f) { return f ? DXGI_FORMAT_D32_FLOAT_
 
 static RenderTarget* GetRenderTarget(uint32_t base, uint32_t pitch, uint32_t format, bool depth)
 {
-    // Chave pelo formato do HOST: formatos Xenos com os mesmos bits (2 e 10, 0 e 1...) sao a mesma memoria na EDRAM
+    // Keyed by the HOST format: Xenos formats with the same bits (2 and 10, 0 and 1...) are the same memory in EDRAM
     const uint64_t hostFmt = uint64_t(depth ? DepthRtFormat(format) : ColorRtFormat(format));
     const uint64_t key = uint64_t(base) | (uint64_t(pitch) << 12) | (hostFmt << 32) | (uint64_t(depth) << 48);
     auto it = g_rts.find(key);
@@ -505,12 +505,12 @@ static RenderTarget* GetRenderTarget(uint32_t base, uint32_t pitch, uint32_t for
         g_cmd->ClearRenderTargetView(CpuHandle(g_rtvHeap.Get(), rt->tex.rtv, g_rtvSize), black, 0, nullptr);
     }
     if (g_logDraws)
-        fprintf(stderr, "[gpu] novo RT %s base=%u pitch=%u formato=%u\n", depth ? "depth" : "cor", base, pitch, format);
+        fprintf(stderr, "[gpu] new RT %s base=%u pitch=%u format=%u\n", depth ? "depth" : "color", base, pitch, format);
     g_rts.emplace(key, rt);
     return rt;
 }
 
-// Hash por amostragem: 64 blocos de 64 bytes espalhados (texturas pequenas: hash completo)
+// Sampled hash: 64 blocks of 64 bytes spread out (small textures: full hash)
 static uint64_t QuickHashGuestMemory(uint32_t addr, uint32_t size)
 {
     if (size <= 16384)
@@ -539,8 +539,8 @@ static HostTexture* GetGuestTexture(const TextureFetch& f)
     uint32_t addr = 0, size = 0;
     if (!GuestTextureExtent(f, addr, size))
         return e->valid ? &e->tex : nullptr;
-    // Mudancas sao detectadas por um hash rapido de 64 amostras espalhadas a cada frame; o hash completo roda
-    // a cada 120 frames (ou quando a amostra muda), em vez de hashear a textura inteira todo frame
+    // Changes are detected by a quick hash of 64 spread samples every frame; the full hash runs
+    // every 120 frames (or when the sample changes), instead of hashing the whole texture every frame
     uint64_t h = 0, q = 0;
     {
         ScopedMs th(g_stats.hashMs);
@@ -551,7 +551,7 @@ static HostTexture* GetGuestTexture(const TextureFetch& f)
         e->lastFullCheck = g_frameNumber;
     }
     if (!e->valid && g_logDraws)
-        fprintf(stderr, "[gpu] textura nova: fmt %u %ux%u pitch %u tiled %d endian %u em %08X (%u bytes)\n", f.format, f.width,
+        fprintf(stderr, "[gpu] new texture: fmt %u %ux%u pitch %u tiled %d endian %u at %08X (%u bytes)\n", f.format, f.width,
                 f.height, f.pitchTexels, f.tiled, f.endian, addr, size);
     if (e->valid && h == e->contentHash)
     {
@@ -623,7 +623,7 @@ static uint32_t GetSampler(const TextureFetch& f)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Inicializacao
+// Initialization
 
 static const char kBlitHlsl[] = R"HLSL(
 struct VsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -641,7 +641,7 @@ VsOut vsmain(uint id : SV_VertexID)
 float4 psmain(VsOut i) : SV_Target { return float4(tex.Sample(samp, i.uv).rgb, 1); }
 )HLSL";
 
-// Rect list do Xenos: 3 vertices de um retangulo; o 4o e deduzido (oposto ao canto do angulo reto)
+// Xenos rect list: 3 vertices of a rectangle; the 4th is derived (opposite the right-angle corner)
 static const char kRectGsHlsl[] = R"HLSL(
 struct V
 {
@@ -674,7 +674,7 @@ void main(triangle V v[3], inout TriangleStream<V> s)
 
 static bool CreateRootSignatures()
 {
-    // Igual ao que o HLSL do XenosRecomp espera: b0/b1/b2 em space4 + heaps bindless em space0..3
+    // Same as what XenosRecomp's HLSL expects: b0/b1/b2 in space4 + bindless heaps in space0..3
     D3D12_DESCRIPTOR_RANGE ranges[4]{};
     for (int i = 0; i < 4; i++)
     {
@@ -712,7 +712,7 @@ static bool CreateRootSignatures()
     if (FAILED(g_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_rootSig))))
         return false;
 
-    // Blit do frontbuffer para o backbuffer
+    // Blit of the frontbuffer to the backbuffer
     D3D12_DESCRIPTOR_RANGE srvRange{ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
     D3D12_ROOT_PARAMETER bp[2]{};
     bp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -732,7 +732,7 @@ static bool CreateRootSignatures()
         FAILED(g_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_blitRootSig))))
         return false;
 
-    // Os shaders internos (blit e GS) usam entry points proprios
+    // The internal shaders (blit and GS) use their own entry points
     std::string vsSrc = std::string(kBlitHlsl) + "\n";
     std::vector<uint8_t> vs, ps;
     std::string vsMain = vsSrc;
@@ -742,7 +742,7 @@ static bool CreateRootSignatures()
     if (!CompileHlsl(vsMain.c_str(), L"vs_6_0", vs) || !CompileHlsl(psMain.c_str(), L"ps_6_0", ps))
         return false;
     if (!CompileHlsl(kRectGsHlsl, L"gs_6_0", g_rectGs))
-        fprintf(stderr, "[gpu] aviso: geometry shader de rect list nao compilou\n");
+        fprintf(stderr, "[gpu] warning: rect list geometry shader did not compile\n");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = g_blitRootSig.Get();
@@ -771,7 +771,7 @@ static void CreateBackBufferViews()
 
 static void CreateDefaultTextures()
 {
-    // 0 = 2D branco, 1 = 3D branco, 2 = cubo branco (texturas nao suportadas/ausentes)
+    // 0 = white 2D, 1 = white 3D, 2 = white cube (unsupported/missing textures)
     D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
     for (int i = 0; i < 3; i++)
     {
@@ -813,14 +813,14 @@ static void CreateDefaultTextures()
         if (i == 2) { sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE; sd.TextureCube.MipLevels = 1; }
         g_device->CreateShaderResourceView(g_defaultTextures[i].Get(), &sd, CpuHandle(g_srvHeap.Get(), i, g_srvSize));
     }
-    // Sampler 0: linear com wrap
+    // Sampler 0: linear with wrap
     D3D12_SAMPLER_DESC sd{};
     sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sd.MaxLOD = D3D12_FLOAT32_MAX;
     sd.MaxAnisotropy = 1;
     g_device->CreateSampler(&sd, CpuHandle(g_samplerHeap.Get(), 0, g_samplerSize));
-    // RTV nulo (slot 0) para render targets nao usados no meio da lista
+    // Null RTV (slot 0) for render targets not used in the middle of the list
     D3D12_RENDER_TARGET_VIEW_DESC rd{};
     rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
@@ -863,7 +863,7 @@ bool RendererInit(bool vsync, uint32_t* registers, const uint8_t* image, size_t 
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
         FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_device))))
     {
-        fprintf(stderr, "[gpu] falha ao criar o device D3D12\n");
+        fprintf(stderr, "[gpu] failed to create the D3D12 device\n");
         return false;
     }
     {
@@ -875,13 +875,13 @@ bool RendererInit(bool vsync, uint32_t* registers, const uint8_t* image, size_t 
             adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd);
             char name[128];
             WideCharToMultiByte(CP_ACP, 0, ad.Description, -1, name, sizeof(name), nullptr, nullptr);
-            fprintf(stderr, "[sessao] GPU: %s (%.1f GB de VRAM, driver %u.%u.%u.%u)\n", name, ad.DedicatedVideoMemory / 1073741824.0,
+            fprintf(stderr, "[session] GPU: %s (%.1f GB of VRAM, driver %u.%u.%u.%u)\n", name, ad.DedicatedVideoMemory / 1073741824.0,
                     unsigned(HIWORD(umd.HighPart)), unsigned(LOWORD(umd.HighPart)), unsigned(HIWORD(umd.LowPart)), unsigned(LOWORD(umd.LowPart)));
         }
         DEVMODEW dm{};
         dm.dmSize = sizeof(dm);
         if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm))
-            fprintf(stderr, "[sessao] monitor: %lux%lu a %lu Hz\n", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency);
+            fprintf(stderr, "[session] monitor: %lux%lu at %lu Hz\n", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency);
     }
     D3D12_COMMAND_QUEUE_DESC qd{ D3D12_COMMAND_LIST_TYPE_DIRECT };
     g_device->CreateCommandQueue(&qd, IID_PPV_ARGS(&g_queue));
@@ -938,13 +938,13 @@ bool RendererInit(bool vsync, uint32_t* registers, const uint8_t* image, size_t 
 
     if (!CreateRootSignatures())
     {
-        fprintf(stderr, "[gpu] falha ao criar root signatures / shaders internos\n");
+        fprintf(stderr, "[gpu] failed to create root signatures / internal shaders\n");
         return false;
     }
     CreateDefaultTextures();
     SubmitAndWait();
     g_enabled = true;
-    fprintf(stderr, "[gpu] D3D12 pronto (vsync %s)\n", vsync ? "ligado" : "desligado");
+    fprintf(stderr, "[gpu] D3D12 ready (vsync %s)\n", vsync ? "on" : "off");
     return true;
 }
 
@@ -956,7 +956,7 @@ bool RendererEnabled() { return g_enabled; }
 struct VsBackendData
 {
     std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
-    std::vector<uint32_t> fetchSlots;   // slot do IA -> fetch constant
+    std::vector<uint32_t> fetchSlots;   // IA slot -> fetch constant
     std::vector<uint32_t> strides;
 };
 
@@ -973,7 +973,7 @@ void RendererSetShader(bool pixel, const uint8_t* microcode, uint32_t sizeDwords
         const uint64_t h = XXH3_64bits(microcode, sizeDwords * 4);
         if (g_missingShaders.insert(h).second && g_missingShaders.size() <= 30)
         {
-            fprintf(stderr, "[gpu] %s shader desconhecido (%u dwords, hash %016llX)\n", pixel ? "pixel" : "vertex",
+            fprintf(stderr, "[gpu] unknown %s shader (%u dwords, hash %016llX)\n", pixel ? "pixel" : "vertex",
                     sizeDwords, (unsigned long long)h);
             char path[96];
             snprintf(path, sizeof(path), "shader_cache/missing_%c_%016llX.bin", pixel ? 'p' : 'v', (unsigned long long)h);
@@ -986,7 +986,7 @@ void RendererSetShader(bool pixel, const uint8_t* microcode, uint32_t sizeDwords
     }
     else if (s && !s->failed && g_logDraws && !s->backendData && !pixel)
     {
-        fprintf(stderr, "[gpu] VS %s (%016llX): %zu entradas\n", s->name.c_str(), (unsigned long long)s->hash, s->inputs.size());
+        fprintf(stderr, "[gpu] VS %s (%016llX): %zu inputs\n", s->name.c_str(), (unsigned long long)s->hash, s->inputs.size());
     }
     (pixel ? g_ps : g_vs) = s;
 }
@@ -1021,7 +1021,7 @@ static VsBackendData* GetVsData(GuestShader* vs)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Estado de pipeline
+// Pipeline state
 
 static D3D12_BLEND MapBlend(uint32_t f, bool alpha)
 {
@@ -1069,10 +1069,10 @@ struct PsoKey
     uint32_t colorMask;
     uint32_t depthControl;
     uint32_t stencilMasks;
-    uint32_t cull;          // 0 nenhum, 1 front, 2 back
+    uint32_t cull;          // 0 none, 1 front, 2 back
     uint32_t frontCcw;
     uint32_t wireframe;
-    uint32_t stripCut;      // 0 desligado, 1 = 0xFFFF, 2 = 0xFFFFFFFF (primitive restart)
+    uint32_t stripCut;      // 0 off, 1 = 0xFFFF, 2 = 0xFFFFFFFF (primitive restart)
 };
 
 static ID3D12PipelineState* GetPso(const PsoKey& key)
@@ -1150,7 +1150,7 @@ static ID3D12PipelineState* GetPso(const PsoKey& key)
     ComPtr<ID3D12PipelineState> pso;
     if (FAILED(g_device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso))))
     {
-        fprintf(stderr, "[gpu] falha ao criar PSO (VS %s, PS %s)\n", key.vs->name.c_str(), key.ps->name.c_str());
+        fprintf(stderr, "[gpu] failed to create PSO (VS %s, PS %s)\n", key.vs->name.c_str(), key.ps->name.c_str());
         g_psos.emplace(h, nullptr);
         return nullptr;
     }
@@ -1176,8 +1176,8 @@ static uint32_t SwapIndex(uint32_t v, uint32_t endian, bool is32)
     }
 }
 
-// Copia com swap de endian para o buffer de upload (dst alinhado a 16, memoria write-combined):
-// pshufb de 16 bytes + store nao temporal
+// Endian-swapping copy into the upload buffer (dst aligned to 16, write-combined memory):
+// 16-byte pshufb + non-temporal store
 static void CopySwapped(uint8_t* dst, const uint8_t* src, uint32_t size, uint32_t endian)
 {
     const uint32_t words = size / 4;
@@ -1186,7 +1186,7 @@ static void CopySwapped(uint8_t* dst, const uint8_t* src, uint32_t size, uint32_
         memcpy(dst, src, words * 4);
         return;
     }
-    // 1/2: swap de 32 bits (os dados ficam no layout do hardware: X nos 16 bits baixos); 3: troca as metades de 16 bits
+    // 1/2: 32-bit swap (data stays in the hardware layout: X in the low 16 bits); 3: swaps the 16-bit halves
     const __m128i mask = endian == 3 ? _mm_setr_epi8(2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)
                                      : _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
     uint32_t i = 0;
@@ -1212,9 +1212,9 @@ static void CopySwapped(uint8_t* dst, const uint8_t* src, uint32_t size, uint32_
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cache de vertex/index buffers entre frames: a copia convertida fica num pool persistente (heap de upload) e as paginas
-// guest ficam vigiadas (memwatch); so recopia quando a CPU do jogo escreve nelas. Paginas escritas com frequencia
-// (dados dinamicos) usam o caminho por draw (anel de upload).
+// Cross-frame vertex/index buffer cache: the converted copy lives in a persistent pool (upload heap) and the guest
+// pages are watched (memwatch); it only re-copies when the game's CPU writes to them. Frequently written pages
+// (dynamic data) use the per-draw path (upload ring).
 
 struct PoolChunk
 {
@@ -1272,13 +1272,13 @@ struct IbEntry
     uint32_t minIndex = 0, maxIndex = 0;
 };
 static std::unordered_map<uint64_t, IbEntry> g_ibCache;
-static uint32_t g_cacheUploads = 0;   // estatistica: buffers (re)copiados para o cache
-// CARS_NO_BUFFER_CACHE=1 desliga o cache (comparacao)
+static uint32_t g_cacheUploads = 0;   // statistics: buffers (re)copied into the cache
+// CARS_NO_BUFFER_CACHE=1 turns the cache off (comparison)
 static const bool g_bufferCache = getenv("CARS_NO_BUFFER_CACHE") == nullptr;
 
 static void CopySwapped(uint8_t* dst, const uint8_t* src, uint32_t size, uint32_t endian);
 
-// VB inteiro (fetch constant: endereco + tamanho) no cache; 0 = usar o caminho sem cache
+// Whole VB (fetch constant: address + size) in the cache; 0 = use the uncached path
 static D3D12_GPU_VIRTUAL_ADDRESS CachedVertexBuffer(uint32_t guest, uint32_t size, uint32_t endian)
 {
     if (size == 0 || size > (32u << 20) || guest < 0xA0000000u)
@@ -1291,10 +1291,10 @@ static D3D12_GPU_VIRTUAL_ADDRESS CachedVertexBuffer(uint32_t guest, uint32_t siz
         e.epoch = epoch;
         return e.gpu;
     }
-    // (Re)carrega. Vigia ANTES de copiar: uma escrita durante a copia suja a pagina e a proxima checagem recarrega
+    // (Re)load. Watch BEFORE copying: a write during the copy dirties the page and the next check reloads
     if (!MemWatchProtect(phys, size))
     {
-        e.gpu = 0;   // pagina dinamica
+        e.gpu = 0;   // dynamic page
         return 0;
     }
     const uint32_t ep = MemWatchEpoch();
@@ -1310,7 +1310,7 @@ static D3D12_GPU_VIRTUAL_ADDRESS CachedVertexBuffer(uint32_t guest, uint32_t siz
     return e.gpu;
 }
 
-// Indices: swap + restart (vira o cut value do host) + faixa min/max numa passada
+// Indices: swap + restart (becomes the host cut value) + min/max range in one pass
 static void ConvertIndices(uint8_t* dst, const uint8_t* src, uint32_t n, bool index32, uint32_t endian, bool restart,
                            uint32_t resetIndex, uint32_t& minIndex, uint32_t& maxIndex)
 {
@@ -1350,7 +1350,7 @@ static void ConvertIndices(uint8_t* dst, const uint8_t* src, uint32_t n, bool in
     }
 }
 
-// IB de um draw no cache (com min/max ja calculados); nullptr = usar o caminho sem cache
+// IB of a draw in the cache (with min/max already computed); nullptr = use the uncached path
 static const IbEntry* CachedIndexBuffer(uint32_t guest, uint32_t n, bool index32, uint32_t endian, bool restart, uint32_t resetIndex)
 {
     const uint32_t bytes = (n * (index32 ? 4 : 2) + 3) & ~3u;
@@ -1431,10 +1431,10 @@ struct SharedConstants
     uint32_t posFlags;
     float posScaleOffset[4];
 };
-static_assert(offsetof(SharedConstants, booleans) == 256, "layout do cbuffer SharedConstants");
-static_assert(offsetof(SharedConstants, posScaleOffset) == 288, "layout do cbuffer SharedConstants");
+static_assert(offsetof(SharedConstants, booleans) == 256, "SharedConstants cbuffer layout");
+static_assert(offsetof(SharedConstants, posScaleOffset) == 288, "SharedConstants cbuffer layout");
 
-// F12 / CARS_TRACE_FRAME: texturas usadas no frame registrado, salvas no swap
+// F12 / CARS_TRACE_FRAME: textures used in the recorded frame, saved at the swap
 struct TraceTextureDump { HostTexture* tex; uint32_t w, h, addr; };
 static std::vector<TraceTextureDump> g_traceTextureDumps;
 
@@ -1449,7 +1449,7 @@ static void BindTextures(GuestShader* s, SharedConstants& sc)
         if (f.type != 2)
             continue;
         if (f.dimension == 2 || f.dimension == 3)
-            continue;   // 3D / cubo: textura padrao (TODO)
+            continue;   // 3D / cube: default texture (TODO)
         HostTexture* t = nullptr;
         auto it = g_resolved.find(f.baseAddress & 0x1FFFFFFF);
         const bool fromResolve = it != g_resolved.end();
@@ -1457,21 +1457,21 @@ static void BindTextures(GuestShader* s, SharedConstants& sc)
             t = it->second;
         else
             t = GetGuestTexture(f);
-        // CARS_LOG_FULLSCREEN=1: cada uso de textura de tela cheia (diagnostico das telas de carregamento)
+        // CARS_LOG_FULLSCREEN=1: every use of a fullscreen texture (loading screen diagnostics)
         static const bool logFullscreen = getenv("CARS_LOG_FULLSCREEN") != nullptr;
         if (logFullscreen && f.width == 1280 && f.height == 720)
-            fprintf(stderr, "[tela] frame %llu: s%u fmt %u endian %u em %08X %s VS=%s PS=%s\n", (unsigned long long)g_frameNumber, slot,
-                    f.format, f.endian, f.baseAddress, t ? (fromResolve ? "resolve" : "ok") : "FALHOU", g_vs ? g_vs->name.c_str() : "-",
+            fprintf(stderr, "[screen] frame %llu: s%u fmt %u endian %u at %08X %s VS=%s PS=%s\n", (unsigned long long)g_frameNumber, slot,
+                    f.format, f.endian, f.baseAddress, t ? (fromResolve ? "resolve" : "ok") : "FAILED", g_vs ? g_vs->name.c_str() : "-",
                     s->name.c_str());
         if (g_frameNumber == g_traceFrame)
         {
             const uint8_t* m = g_mem.base + GpuPhysToGuest(f.baseAddress);
-            fprintf(TraceOut(), "[frame]   textura s%u (do draw seguinte): fmt %u %ux%u dim %u tiled %d endian %u swizzle %03X em %08X -> %s | "
+            fprintf(TraceOut(), "[frame]   texture s%u (of the next draw): fmt %u %ux%u dim %u tiled %d endian %u swizzle %03X at %08X -> %s | "
                             "bytes %02X %02X %02X %02X %02X %02X %02X %02X\n",
                     slot, f.format, f.width, f.height, f.dimension, f.tiled, f.endian, f.swizzle, f.baseAddress,
-                    t ? (fromResolve ? "resolve" : "ok") : "FALHOU", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
-            // texturas grandes nao comprimidas: salvas no fim do frame (o que foi enviado para a GPU, para comparar com a tela)
-            // (uma vez cada: no HUB a mesma textura aparece em centenas de draws e cada copia da GPU custa uma espera)
+                    t ? (fromResolve ? "resolve" : "ok") : "FAILED", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+            // large uncompressed textures: saved at the end of the frame (what was sent to the GPU, to compare with the screen)
+            // (once each: in HUB the same texture shows up in hundreds of draws and each GPU copy costs a wait)
             if (t && f.width >= 256 && f.height >= 256 && g_traceTextureDumps.size() < 32 &&
                 (t->format == DXGI_FORMAT_R8G8B8A8_UNORM || t->format == DXGI_FORMAT_B8G8R8A8_UNORM || t->format == DXGI_FORMAT_R10G10B10A2_UNORM) &&
                 std::none_of(g_traceTextureDumps.begin(), g_traceTextureDumps.end(), [&](const TraceTextureDump& d) { return d.tex == t; }))
@@ -1492,7 +1492,7 @@ static void DumpTexture(HostTexture& t, uint32_t w, uint32_t h, const std::files
 static void TraceSkip(int line)
 {
     if (g_frameNumber == g_traceFrame)
-        fprintf(TraceOut(), "[frame] draw PULADO (renderer.cpp:%d) VS=%s PS=%s\n", line, g_vs ? g_vs->name.c_str() : "-", g_ps ? g_ps->name.c_str() : "-");
+        fprintf(TraceOut(), "[frame] draw SKIPPED (renderer.cpp:%d) VS=%s PS=%s\n", line, g_vs ? g_vs->name.c_str() : "-", g_ps ? g_ps->name.c_str() : "-");
 }
 
 void RendererDraw(const DrawCall& draw)
@@ -1514,7 +1514,7 @@ void RendererDraw(const DrawCall& draw)
         vs = ShadersLinkRawVertexShader(vs, g_ps);
     if (vs && g_ps && (!vs->IsReady() || !g_ps->IsReady()))
     {
-        g_stats.pendingShader++; TraceSkip(__LINE__);   // compilando em segundo plano
+        g_stats.pendingShader++; TraceSkip(__LINE__);   // compiling in the background
         return;
     }
     if (!vs || !g_ps || vs->failed || g_ps->failed || vs->dxil.empty() || g_ps->dxil.empty())
@@ -1571,7 +1571,7 @@ void RendererDraw(const DrawCall& draw)
     if (!key.numRts && !depthRt)
     {
         if (g_frameNumber == g_traceFrame)
-            fprintf(TraceOut(), "[frame]   sem RT: modo %u, psOutputs %X, mascara %08X, color info %08X, dc %08X\n", mode, g_ps->psOutputs,
+            fprintf(TraceOut(), "[frame]   no RT: mode %u, psOutputs %X, mask %08X, color info %08X, dc %08X\n", mode, g_ps->psOutputs,
                     colorMaskReg, r[xreg::RB_COLOR_INFO], dc);
         g_stats.skippedOther++; TraceSkip(__LINE__);
         return;
@@ -1580,7 +1580,7 @@ void RendererDraw(const DrawCall& draw)
         if (!colorRts[i])
             key.rtFormats[i] = DXGI_FORMAT_UNKNOWN;
 
-    // ---- primitiva ----
+    // ---- primitive ----
     std::vector<uint32_t> converted;
     bool useConverted = false;
     D3D_PRIMITIVE_TOPOLOGY topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -1632,17 +1632,17 @@ void RendererDraw(const DrawCall& draw)
         return;
     }
 
-    // ---- rasterizacao ----
+    // ---- rasterization ----
     const uint32_t sc = r[xreg::PA_SU_SC_MODE_CNTL];
-    // Primitive restart (PA_SU_SC_MODE_CNTL.multi_prim_ib_ena): em strips, o indice VGT_MULTI_PRIM_IB_RESET_INDX separa
-    // tiras. Vira o "cut value" do D3D12 (sem isso a vegetacao, desenhada como uma tira so, liga moitas distantes).
+    // Primitive restart (PA_SU_SC_MODE_CNTL.multi_prim_ib_ena): in strips, the VGT_MULTI_PRIM_IB_RESET_INDX index separates
+    // strips. It becomes the D3D12 "cut value" (without it the vegetation, drawn as a single strip, joins distant bushes).
     const bool restart = draw.indexed && !useConverted && (draw.primType == 3 || draw.primType == 6) && ((sc >> 21) & 1);
     key.stripCut = restart ? (draw.index32 ? 2u : 1u) : 0u;
     const bool triangles = key.topologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE && !key.useGs;
     if (triangles)
     {
         if ((sc & 3) == 3)
-            return;   // tudo descartado
+            return;   // everything discarded
         key.cull = (sc & 1) ? 1 : (sc & 2) ? 2 : 0;
         key.frontCcw = ((sc >> 2) & 1) == 0;
         key.wireframe = Bits(sc, 3, 2) != 0 && Bits(sc, 5, 3) == 1;
@@ -1656,7 +1656,7 @@ void RendererDraw(const DrawCall& draw)
         return;
     }
 
-    // ---- indices (uma passada: swap + restart + faixa min/max) ----
+    // ---- indices (one pass: swap + restart + min/max range) ----
     const auto vbStart = std::chrono::steady_clock::now();
     const int32_t baseVertex = int32_t(r[xreg::VGT_INDX_OFFSET]);
     uint32_t minIndex = UINT32_MAX, maxIndex = 0;
@@ -1703,12 +1703,12 @@ void RendererDraw(const DrawCall& draw)
         maxIndex = n - 1;
     }
     if (minIndex > maxIndex)
-        return;   // so indices de restart
+        return;   // only restart indices
     if (ModelCaptureActive())
-        ModelCaptureDraw(draw, vs, g_ps, r);   // F11: guarda a malha (model_capture.cpp)
+        ModelCaptureDraw(draw, vs, g_ps, r);   // F11: records the mesh (model_capture.cpp)
 
-    // ---- vertex buffers: so os vertices [min, max] do draw ----
-    // O VB do host comeca no vertice vbStartVertex; o deslocamento volta no BaseVertexLocation / StartVertexLocation
+    // ---- vertex buffers: only the vertices [min, max] of the draw ----
+    // The host VB starts at vertex vbStartVertex; the offset comes back through BaseVertexLocation / StartVertexLocation
     const int64_t firstVertex = int64_t(minIndex) + baseVertex;
     const uint32_t vbStartVertex = uint32_t(std::max<int64_t>(0, firstVertex));
     const uint32_t vertexCount = uint32_t(int64_t(maxIndex) + baseVertex - int64_t(vbStartVertex) + 1);
@@ -1732,7 +1732,7 @@ void RendererDraw(const DrawCall& draw)
         size = std::min<uint64_t>((size + 3) & ~3ull, 32u << 20);
         if (!size)
             continue;
-        // VB inteiro no cache entre frames: a view aponta para os mesmos vertices [vbStartVertex, ...] do caminho por draw
+        // Whole VB in the cross-frame cache: the view points at the same vertices [vbStartVertex, ...] as the per-draw path
         if (const D3D12_GPU_VIRTUAL_ADDRESS cached = g_bufferCache ? CachedVertexBuffer(addr, fetchSize, d1 & 3) : 0)
         {
             vbvs[i] = { cached + srcOff, uint32_t(std::min<uint64_t>(size, fetchSize - srcOff)), stride };
@@ -1747,9 +1747,9 @@ void RendererDraw(const DrawCall& draw)
     }
 
     g_stats.vbMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vbStart).count();
-    // ---- constantes ----
-    // Os bancos de constantes do VS (4 KB) e do PS (3,5 KB) so sao copiados de novo quando o jogo escreveu neles
-    // desde o ultimo draw (g_aluDirty, marcado pelo processador de comandos); senao o draw reusa a copia anterior
+    // ---- constants ----
+    // The VS (4 KB) and PS (3.5 KB) constant banks are only copied again when the game wrote to them
+    // since the last draw (g_aluDirty, set by the command processor); otherwise the draw reuses the previous copy
     D3D12_GPU_VIRTUAL_ADDRESS vsCb, psCb, sharedCb;
     if ((g_aluDirty & 1) || !g_vsCbCache)
     {
@@ -1779,15 +1779,15 @@ void RendererDraw(const DrawCall& draw)
     for (uint32_t b : g_ps->boolRegs)
         if (b < 16 && ReadBool(b))
             shared.booleans |= 1u << (16 + b);
-    // Os dados de vertice ja ficam no layout do hardware (X nos 16 bits baixos depois do swap de 32 bits, como no Xenia):
-    // a troca yx do XenosRecomp (feita para o Sonic) inverteria TEXCOORDs de 16 bits que ja estao certos
+    // Vertex data is already in the hardware layout (X in the low 16 bits after the 32-bit swap, as in Xenia):
+    // XenosRecomp's yx swap (made for Sonic) would flip 16-bit TEXCOORDs that are already correct
     shared.swappedTexcoords = 0;
     const uint32_t cc = r[xreg::RB_COLORCONTROL];
     shared.alphaThreshold = AsFloat(r[xreg::RB_ALPHA_REF]);
     shared.alphaFunc = (cc & 8) ? (cc & 7) : 7;
     shared.specConstants = ((cc & 8) ? 2u : 0u) | (vs->usesPackedNormals ? 1u : 0u);
 
-    // Viewport do Xenos -> espaco de clip do host (viewport do host = RT inteiro)
+    // Xenos viewport -> host clip space (host viewport = whole RT)
     const uint32_t rtW = pitch, rtH = kRtHeight;
     const uint32_t vte = r[xreg::PA_CL_VTE_CNTL];
     const float sx = (vte & 1) ? AsFloat(r[xreg::PA_CL_VPORT_XSCALE]) : 1.0f;
@@ -1814,7 +1814,7 @@ void RendererDraw(const DrawCall& draw)
     shared.posScaleOffset[3] = 1.0f - 2.0f * oy / float(rtH);
     memcpy(UploadAlloc(512, 256, &sharedCb), &shared, sizeof(shared));
 
-    // ---- comandos (so o estado que mudou desde o ultimo draw: cada chamada custa no driver) ----
+    // ---- commands (only the state that changed since the last draw: every call costs time in the driver) ----
     const ScreenRect s = GetScissor(rtW, rtH);
     if (s.x1 <= s.x0 || s.y1 <= s.y0)
     {
@@ -1864,7 +1864,7 @@ void RendererDraw(const DrawCall& draw)
     }
     if (!b.valid)
     {
-        // root signature e tabelas bindless: iguais para todos os draws da lista de comandos
+        // root signature and bindless tables: the same for every draw of the command list
         g_cmd->SetGraphicsRootSignature(g_rootSig.Get());
         const D3D12_GPU_DESCRIPTOR_HANDLE srvBase = g_srvHeap->GetGPUDescriptorHandleForHeapStart();
         g_cmd->SetGraphicsRootDescriptorTable(3, srvBase);
@@ -1907,7 +1907,7 @@ void RendererDraw(const DrawCall& draw)
     g_stats.draws++;
     if (g_logDraws && g_frameNumber < 400 && g_stats.draws <= 3)
         fprintf(stderr, "[gpu] draw prim=%u n=%u idx=%d VS=%s PS=%s rt0=%s pitch=%u\n", draw.primType, n, draw.indexed,
-                vs->name.c_str(), g_ps->name.c_str(), colorRts[0] ? "sim" : "nao", pitch);
+                vs->name.c_str(), g_ps->name.c_str(), colorRts[0] ? "yes" : "no", pitch);
     if (g_frameNumber == g_traceFrame)
     {
         static std::unordered_set<GuestShader*> listed;
@@ -1915,7 +1915,7 @@ void RendererDraw(const DrawCall& draw)
             for (const auto& in : vs->inputs)
             {
                 const uint32_t d1 = r[xreg::FETCH_CONSTANTS + in.fetchSlot * 2 + 1];
-                fprintf(TraceOut(), "[frame]   VS %s entrada %s%u: fmt %u off %u stride %u slot %u int %d sinal %d rf %d exp %d endian %u indice r%u.%c\n",
+                fprintf(TraceOut(), "[frame]   VS %s input %s%u: fmt %u off %u stride %u slot %u int %d signed %d rf %d exp %d endian %u index r%u.%c\n",
                         vs->name.c_str(), in.semantic, in.semanticIndex, in.format, in.offsetBytes, in.strideBytes, in.fetchSlot,
                         in.isInteger, in.isSigned, in.signedRf, in.expAdjust, d1 & 3, in.srcRegister, "xyzw"[in.srcComponent]);
             }
@@ -1924,20 +1924,20 @@ void RendererDraw(const DrawCall& draw)
                         " | vp s=(%.1f,%.1f,%.3f) o=(%.1f,%.1f,%.3f) vte=%03X | scissor %d,%d-%d,%d | blend0=%08X mask=%04X cull=%u"
                         " | wofs=%08X sc=%08X\n",
                 draw.primType, n, draw.indexed, vs->name.c_str(), g_ps->name.c_str(), ci & 0xFFF, Bits(ci, 16, 4), pitch,
-                Bits(r[xreg::RB_SURFACE_INFO], 16, 2), key.numRts, depthRt ? "sim" : "nao", di & 0xFFF, dc, sx, sy, zs, ox, oy, zo,
+                Bits(r[xreg::RB_SURFACE_INFO], 16, 2), key.numRts, depthRt ? "yes" : "no", di & 0xFFF, dc, sx, sy, zs, ox, oy, zo,
                 vte, s.x0, s.y0, s.x1, s.y1, key.blend[0], key.colorMask, key.cull, r[xreg::PA_SC_WINDOW_OFFSET], sc);
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Resolve (copia EDRAM -> textura) e clears
+// Resolve (EDRAM -> texture copy) and clears
 
 static float HalfToFloat(uint16_t h)
 {
     const uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
     uint32_t f;
     if (e == 0)
-        f = m ? 0 : s << 31;   // subnormais -> 0
+        f = m ? 0 : s << 31;   // denormals -> 0
     else if (e == 31)
         f = (s << 31) | 0x7F800000 | (m << 13);
     else
@@ -1977,14 +1977,14 @@ static void DecodeClearColor(uint32_t xenosFormat, uint32_t hi, uint32_t lo, flo
     }
 }
 
-// Texturas de destino de resolve, com a faixa de memoria guest que ocupam (textura tiled: macro tiles de 32x32).
-// O D3D faz resolves parciais (predicated tiling, sub-retangulos) avancando RB_COPY_DEST_BASE em macro tiles:
-// um destino dentro da faixa de uma textura existente vira um deslocamento (dx, dy) nessa textura.
+// Resolve destination textures, with the guest memory range they occupy (tiled texture: 32x32 macro tiles).
+// D3D does partial resolves (predicated tiling, sub-rectangles) advancing RB_COPY_DEST_BASE in macro tiles:
+// a destination inside the range of an existing texture becomes an offset (dx, dy) in that texture.
 struct ResolveEntry
 {
     HostTexture* tex;
-    uint32_t size;          // bytes na memoria guest
-    uint32_t pitchAligned;  // pixels, multiplo de 32
+    uint32_t size;          // bytes in guest memory
+    uint32_t pitchAligned;  // pixels, multiple of 32
     uint32_t bpp;
 };
 static std::map<uint32_t, ResolveEntry> g_resolveEntries;
@@ -2005,7 +2005,7 @@ static HostTexture* GetResolveTexture(uint32_t phys, DXGI_FORMAT fmt, uint32_t d
                                       uint32_t needW, uint32_t needH, uint32_t& dx, uint32_t& dy)
 {
     dx = dy = 0;
-    // Dentro de uma textura de resolve ja existente (base menor ou igual)?
+    // Inside an already existing resolve texture (base lower or equal)?
     auto it = g_resolveEntries.upper_bound(phys);
     if (it != g_resolveEntries.begin())
     {
@@ -2035,11 +2035,11 @@ static HostTexture* GetResolveTexture(uint32_t phys, DXGI_FORMAT fmt, uint32_t d
             delete nt;
             return t;
         }
-        t = nt;   // a antiga e vazada de proposito (pode estar em uso na GPU)
+        t = nt;   // the old one is leaked on purpose (it may be in use on the GPU)
     }
     ResolveEntry e{ t, ((std::max(destPitch, 1u) + 31) & ~31u) * ((std::max(destHeight, 1u) + 31) & ~31u) * bpp,
                     (std::max(destPitch, 1u) + 31) & ~31u, bpp };
-    // Entradas "filhas" dentro desta faixa (criadas antes da textura inteira aparecer) deixam de valer
+    // "Child" entries inside this range (created before the whole texture showed up) are no longer valid
     for (auto c = g_resolveEntries.upper_bound(phys); c != g_resolveEntries.end() && c->first < phys + e.size;)
     {
         g_resolved.erase(c->first);
@@ -2060,7 +2060,7 @@ static void DoResolve()
     if (!pitch)
         return;
 
-    // Retangulo: D3D9 sempre poe os 3 vertices no vertex fetch 0
+    // Rectangle: D3D9 always puts the 3 vertices in vertex fetch 0
     const uint32_t d0 = r[xreg::FETCH_CONSTANTS], d1 = r[xreg::FETCH_CONSTANTS + 1];
     if ((d0 & 3) != 3)
         return;
@@ -2095,7 +2095,7 @@ static void DoResolve()
     g_resolvesThisFrame++;
     const D3D12_RECT rect{ x0, y0, x1, y1 };
     if (g_frameNumber == g_traceFrame)
-        fprintf(TraceOut(), "[frame] RESOLVE src=%u (color info %08X, depth info %08X) pitch=%u msaa=%u rect %d,%d-%d,%d -> dest %08X pitch/h %08X info %08X | clear cor=%d depth=%d cmd=%u | wofs=%08X\n",
+        fprintf(TraceOut(), "[frame] RESOLVE src=%u (color info %08X, depth info %08X) pitch=%u msaa=%u rect %d,%d-%d,%d -> dest %08X pitch/h %08X info %08X | clear color=%d depth=%d cmd=%u | wofs=%08X\n",
                 src, src < 4 ? r[kColorInfoRegs[src]] : 0, r[xreg::RB_DEPTH_INFO], pitch, Bits(r[xreg::RB_SURFACE_INFO], 16, 2), x0, y0, x1, y1,
                 r[xreg::RB_COPY_DEST_BASE], r[xreg::RB_COPY_DEST_PITCH], r[xreg::RB_COPY_DEST_INFO], colorClear, depthClear, copyCmd,
                 r[xreg::PA_SC_WINDOW_OFFSET]);
@@ -2121,7 +2121,7 @@ static void DoResolve()
                 sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                 dl.pResource = dst->res.Get();
                 dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                // Destino = retangulo da EDRAM + deslocamento do macro tile (dx, dy)
+                // Destination = EDRAM rectangle + macro tile offset (dx, dy)
                 const uint32_t cx1 = std::min<uint32_t>(uint32_t(x1), dst->width - std::min(dst->width, dx));
                 const uint32_t cy1 = std::min<uint32_t>(uint32_t(y1), dst->height - std::min(dst->height, dy));
                 D3D12_BOX box{ uint32_t(x0), uint32_t(y0), 0, std::min(cx1, rt->tex.width), std::min(cy1, rt->tex.height), 1 };
@@ -2129,15 +2129,15 @@ static void DoResolve()
                     g_cmd->CopyTextureRegion(&dl, uint32_t(x0) + dx, uint32_t(y0) + dy, 0, &sl, &box);
                 if (g_frameNumber == g_traceFrame)
                 {
-                    fprintf(TraceOut(), "[frame]   -> copia para (%u,%u) na textura de %ux%u\n", x0 + dx, y0 + dy, dst->width, dst->height);
-                    // Conteudo do RT (EDRAM) no momento do resolve
+                    fprintf(TraceOut(), "[frame]   -> copy to (%u,%u) in the %ux%u texture\n", x0 + dx, y0 + dy, dst->width, dst->height);
+                    // RT (EDRAM) contents at resolve time
                     static int resolveIndex = 0;
                     char path[80];
                     snprintf(path, sizeof(path), "frame_%llu_rt%02d.png", (unsigned long long)g_frameNumber, resolveIndex++);
                     Transition(rt->tex, D3D12_RESOURCE_STATE_RENDER_TARGET);
                     DumpTexture(rt->tex, rt->tex.width, std::min<uint32_t>(rt->tex.height, 720), CapturePath(path));
                 }
-                // copy_dest_swap (bit 24): o Xenos grava com R e B trocados; aplicado no SRV (HostTexture::rbSwap)
+                // copy_dest_swap (bit 24): Xenos writes with R and B swapped; applied in the SRV (HostTexture::rbSwap)
                 dst->rbSwap = (r[xreg::RB_COPY_DEST_INFO] >> 24) & 1;
                 Transition(*dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 Transition(rt->tex, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -2168,9 +2168,9 @@ static void DoResolve()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Swap / apresentacao
+// Swap / presentation
 
-// Uma linha de textura (formatos de frontbuffer/RT) -> BGR 8 bits como aparece na tela (o blit usa o SRV sem troca R/B)
+// One texture row (frontbuffer/RT formats) -> 8-bit BGR as it appears on screen (the blit uses the SRV without the R/B swap)
 static uint8_t ToByte(float v) { return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); }
 static void RowToBgr8(DXGI_FORMAT format, const uint8_t* s, uint8_t* d, uint32_t w)
 {
@@ -2204,8 +2204,8 @@ static void RowToBgr8(DXGI_FORMAT format, const uint8_t* s, uint8_t* d, uint32_t
 
 namespace capture { void QueueImageWrite(std::filesystem::path path, std::vector<uint8_t> bgr, uint32_t w, uint32_t h); }
 
-// ---- Depuracao: CARS_DUMP_FRAMES=100,300 salva o frontbuffer desses frames em frame_N.png; F12 salva o frame seguinte ----
-// (o PNG e gravado pela thread de capturas: a thread de render so espera a copia da GPU)
+// ---- Debugging: CARS_DUMP_FRAMES=100,300 saves the frontbuffer of those frames to frame_N.png; F12 saves the next frame ----
+// (the PNG is written by the capture thread: the render thread only waits for the GPU copy)
 static void DumpTexture(HostTexture& t, uint32_t w, uint32_t h, const std::filesystem::path& path)
 {
     w = std::min(w, t.width);
@@ -2262,13 +2262,13 @@ static void HandleResize()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Frontbuffer na memoria guest, sob demanda (veja RendererHandleFrontbufferAccess em renderer.h)
+// Frontbuffer in guest memory, on demand (see RendererHandleFrontbufferAccess in renderer.h)
 
 static std::mutex g_fbMutex;
 static HostTexture* g_fbTex = nullptr;
 static uint32_t g_fbPhys = 0, g_fbBytes = 0, g_fbW = 0, g_fbH = 0;
 static std::atomic<bool> g_fbProtected{ false };
-static std::atomic<uint32_t> g_fbReadbacks{ 0 };   // estatistica: copias GPU -> memoria guest por segundo
+static std::atomic<uint32_t> g_fbReadbacks{ 0 };   // statistics: GPU -> guest memory copies per second
 static ComPtr<ID3D12CommandAllocator> g_fbAlloc;
 static ComPtr<ID3D12GraphicsCommandList> g_fbList;
 static ComPtr<ID3D12Fence> g_fbFence;
@@ -2276,7 +2276,7 @@ static ComPtr<ID3D12Resource> g_fbReadback;
 static uint64_t g_fbReadbackSize = 0, g_fbFenceValue = 0;
 static HANDLE g_fbEvent = nullptr;
 
-// g_fbPhys = inicio exato do frontbuffer; a protecao cobre as paginas inteiras [g_fbPhys & ~0xFFF, +g_fbBytes)
+// g_fbPhys = exact start of the frontbuffer; the protection covers the whole pages [g_fbPhys & ~0xFFF, +g_fbBytes)
 static void ProtectFrontbuffer(bool on)
 {
     for (uint32_t view : { 0xA0000000u, 0xC0000000u, 0xE0000000u })
@@ -2286,8 +2286,8 @@ static void ProtectFrontbuffer(bool on)
     }
 }
 
-// Le a textura do frontbuffer na GPU (lista de comandos propria: a do processador de comandos e de outra thread) e escreve
-// BGRA8 linear na memoria guest. Chamado com g_fbMutex travado e as paginas ja liberadas.
+// Reads the frontbuffer texture on the GPU (own command list: the command processor's belongs to another thread) and writes
+// linear BGRA8 into guest memory. Called with g_fbMutex locked and the pages already unprotected.
 static void ReadbackFrontbufferLocked()
 {
     HostTexture& t = *g_fbTex;
@@ -2320,7 +2320,7 @@ static void ReadbackFrontbufferLocked()
     }
     g_fbAlloc->Reset();
     g_fbList->Reset(g_fbAlloc.Get(), nullptr);
-    // No fim de cada frame (RendererSwap) a textura do frontbuffer fica como shader resource
+    // At the end of each frame (RendererSwap) the frontbuffer texture is left as a shader resource
     const D3D12_RESOURCE_STATES srv = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2352,7 +2352,7 @@ static void ReadbackFrontbufferLocked()
     const D3D12_RANGE range{ 0, size_t(need) };
     if (FAILED(g_fbReadback->Map(0, &range, reinterpret_cast<void**>(const_cast<uint8_t**>(&p)))) || !p)
         return;
-    // Layout com tiling 2D do Xenos (como o resolve grava; o jogo le o frontbuffer como superficie tiled)
+    // Xenos 2D tiled layout (as the resolve writes it; the game reads the frontbuffer as a tiled surface)
     uint8_t* out = g_mem.base + 0xA0000000u + g_fbPhys;
     for (uint32_t y = 0; y < h; y++)
     {
@@ -2385,7 +2385,7 @@ static void ReadbackFrontbufferLocked()
                 r = s[x * 4]; g = s[x * 4 + 1]; bl = s[x * 4 + 2]; a = s[x * 4 + 3];
                 break;
             }
-            // Como o resolve do Xenos (k_8_8_8_8, endian 0): com dest_swap bytes B G R A, sem dest_swap R G B A
+            // Like the Xenos resolve (k_8_8_8_8, endian 0): with dest_swap bytes B G R A, without dest_swap R G B A
             if (t.rbSwap) { d[0] = bl; d[1] = g; d[2] = r; } else { d[0] = r; d[1] = g; d[2] = bl; }
             d[3] = a;
         }
@@ -2400,7 +2400,7 @@ bool RendererHandleFrontbufferAccess(uint32_t guestAddr)
         return false;
     std::lock_guard<std::mutex> lock(g_fbMutex);
     if (!g_fbProtected.load())
-        return true;   // outra thread ja tratou
+        return true;   // another thread already handled it
     ProtectFrontbuffer(false);
     g_fbProtected = false;
     if (g_fbTex)
@@ -2408,16 +2408,16 @@ bool RendererHandleFrontbufferAccess(uint32_t guestAddr)
     g_fbReadbacks++;
     static int logged = 0;
     if (logged++ < 10)
-        fprintf(stderr, "[frontbuffer] a CPU leu o frontbuffer (%08X): imagem copiada da GPU para a memoria do jogo\n", guestAddr);
+        fprintf(stderr, "[frontbuffer] the CPU read the frontbuffer (%08X): image copied from the GPU into game memory\n", guestAddr);
     return true;
 }
 
-// Fim do swap: o frontbuffer atual fica protegido ate a CPU tocar nele
+// End of the swap: the current frontbuffer stays protected until the CPU touches it
 static void ArmFrontbuffer(HostTexture* tex, uint32_t phys, uint32_t w, uint32_t h)
 {
     std::lock_guard<std::mutex> lock(g_fbMutex);
     const uint32_t exact = phys & 0x1FFFFFFF;
-    // superficie tiled: linhas e colunas alinhadas a 32 texels
+    // tiled surface: rows and columns aligned to 32 texels
     const uint32_t bytes = ((exact & 0xFFF) + ((w + 31) & ~31u) * ((h + 31) & ~31u) * 4 + 0xFFF) & ~0xFFFu;
     if (g_fbProtected && (exact != g_fbPhys || bytes != g_fbBytes))
     {
@@ -2437,15 +2437,15 @@ static void ArmFrontbuffer(HostTexture* tex, uint32_t phys, uint32_t w, uint32_t
 }
 
 // ---------------------------------------------------------------------------------------------
-// Log de sessao: 4 capturas por segundo do frontbuffer (copia na GPU para um buffer de readback, convertida na thread
-// "capturas") num anel dos ultimos 5 s. F12 = marca: salva o anel em marca_NN\ (JPEG + a mais recente em PNG), os ultimos
-// 10 s de som e o trace completo do frame seguinte (frame.txt + imagens do frame, das texturas e dos resolves)
+// Session log: 4 frontbuffer captures per second (copied on the GPU to a readback buffer, converted on the
+// "captures" thread) into a ring of the last 5 s. F12 = mark: saves the ring to mark_NN\ (JPEG + the newest as PNG), the last
+// 10 s of audio and the complete trace of the next frame (frame.txt + images of the frame, its textures and its resolves)
 
 bool AudioSaveRecent(const std::filesystem::path& path);   // kernel_audio.cpp
 
 namespace capture
 {
-constexpr uint32_t kSlots = 4;      // copias em voo na GPU
+constexpr uint32_t kSlots = 4;      // copies in flight on the GPU
 constexpr uint32_t kRing = 20;      // 5 s
 constexpr double kInterval = 0.25;
 
@@ -2457,7 +2457,7 @@ struct Slot
 };
 struct Job
 {
-    int slot = -1;                      // -1: salvar o anel em saveDir; -2: gravar bgr em file (PNG)
+    int slot = -1;                      // -1: save the ring to saveDir; -2: write bgr to file (PNG)
     uint64_t fence = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     uint32_t w = 0, h = 0, rowPitch = 0;
@@ -2480,14 +2480,14 @@ Slot g_slots[kSlots];
 std::mutex g_mutex;
 std::condition_variable g_cv;
 std::deque<Job> g_jobs;
-std::vector<Job> g_pending;             // copias gravadas na lista deste frame (o fence sai no Signal do swap)
-Image g_ring[kRing];                    // so a thread de capturas mexe
+std::vector<Job> g_pending;             // copies recorded in this frame's list (the fence goes out with the swap's Signal)
+Image g_ring[kRing];                    // only the capture thread touches it
 uint32_t g_ringNext = 0;
 HANDLE g_event = nullptr;
-bool g_force = false;                   // F12: captura este frame mesmo fora do intervalo
+bool g_force = false;                   // F12: capture this frame even outside the interval
 int g_markIndex = 0;
-std::filesystem::path g_markDir;        // F12: salvar o anel no fim deste swap
-uint64_t g_noticeUntil = 0;             // aviso no titulo da janela
+std::filesystem::path g_markDir;        // F12: save the ring at the end of this swap
+uint64_t g_noticeUntil = 0;             // notice in the window title
 wchar_t g_notice[96];
 
 double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -2498,25 +2498,25 @@ void Save(const Job& job)
     const Image* newest = nullptr;
     for (uint32_t i = 0; i < kRing; i++)
     {
-        const Image& img = g_ring[(g_ringNext + i) % kRing];   // da mais antiga para a mais nova
+        const Image& img = g_ring[(g_ringNext + i) % kRing];   // from oldest to newest
         if (img.bgr.empty() || job.time - img.time > 6.0)
             continue;
         char name[64];
-        snprintf(name, sizeof(name), "tela_%02u_%+.2fs.jpg", ++saved, img.time - job.time);
+        snprintf(name, sizeof(name), "screen_%02u_%+.2fs.jpg", ++saved, img.time - job.time);
         WriteImageFile(job.saveDir / name, img.bgr.data(), img.w, img.h, img.w * 3, true);
         newest = &img;
     }
     if (newest)
-        WriteImageFile(job.saveDir / "tela_agora.png", newest->bgr.data(), newest->w, newest->h, newest->w * 3, false);
-    const bool audio = AudioSaveRecent(job.saveDir / "som_ultimos_10s.wav");
-    fprintf(stderr, "[MARCA %02d] salvas %u capturas dos ultimos segundos%s em %s\n", job.mark, saved,
-            audio ? " e o som dos ultimos 10 s" : "", job.saveDir.string().c_str());
+        WriteImageFile(job.saveDir / "screen_now.png", newest->bgr.data(), newest->w, newest->h, newest->w * 3, false);
+    const bool audio = AudioSaveRecent(job.saveDir / "audio_last_10s.wav");
+    fprintf(stderr, "[MARK %02d] saved %u screenshots of the last seconds%s to %s\n", job.mark, saved,
+            audio ? " and the audio of the last 10 s" : "", job.saveDir.string().c_str());
     SessionLogFlush();
 }
 
 void Thread()
 {
-    SetThreadDescription(GetCurrentThread(), L"capturas");
+    SetThreadDescription(GetCurrentThread(), L"captures");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     for (;;)
     {
@@ -2563,7 +2563,7 @@ void Thread()
     }
 }
 
-// Na lista de comandos do swap, antes do blit: copia o frontbuffer para um slot livre
+// In the swap's command list, before the blit: copy the frontbuffer to a free slot
 void Record(HostTexture& fb, uint32_t width, uint32_t height)
 {
     static double last = 0;
@@ -2649,7 +2649,7 @@ void QueueImageWrite(std::filesystem::path path, std::vector<uint8_t> bgr, uint3
     g_cv.notify_one();
 }
 
-// Depois do Signal do swap: as copias deste frame (e o pedido de salvar da marca) vao para a thread de capturas
+// After the swap's Signal: this frame's copies (and the mark's save request) go to the capture thread
 void Submit(uint64_t fence)
 {
     if (g_pending.empty() && g_markDir.empty())
@@ -2677,12 +2677,12 @@ void Submit(uint64_t fence)
 }
 }  // namespace capture
 
-// F12: marca no log + capturas dos ultimos segundos + som + trace do frame seguinte, tudo em marca_NN
+// F12: mark in the log + screenshots of the last seconds + audio + trace of the next frame, all in mark_NN
 static void StartMark()
 {
     using namespace capture;
     g_markDir = SessionNewMark(g_markIndex);
-    fprintf(stderr, "[MARCA %02d] ===== F12: algo estranho aqui (frame %llu) =====\n", g_markIndex, (unsigned long long)g_frameNumber);
+    fprintf(stderr, "[MARK %02d] ===== F12: something odd here (frame %llu) =====\n", g_markIndex, (unsigned long long)g_frameNumber);
     g_force = true;
     if (!g_traceOut && g_traceFrame <= g_frameNumber)
     {
@@ -2691,17 +2691,17 @@ static void StartMark()
         g_captureDir = g_markDir;
         g_traceOut = _wfopen((g_markDir / L"frame.txt").c_str(), L"w");
         if (g_traceOut)
-            fprintf(g_traceOut, "[frame] trace do frame %llu (marca %02d)\n", (unsigned long long)g_traceFrame, g_markIndex);
+            fprintf(g_traceOut, "[frame] trace of frame %llu (mark %02d)\n", (unsigned long long)g_traceFrame, g_markIndex);
     }
-    swprintf(g_notice, 96, L"Cars Race-O-Rama (recomp) - MARCA %02d salva na pasta logs", g_markIndex);
+    swprintf(g_notice, 96, L"Cars Race-O-Rama (recomp) - MARK %02d saved in the logs folder", g_markIndex);
     g_noticeUntil = GetTickCount64() + 3000;
     SetWindowTextW(g_hwnd, g_notice);
 }
 
 uint64_t RendererLastSwapTick() { return g_lastSwapTick.load(); }
 
-// Limite de FPS do .ini ([Video] FPS). Com o vblank imediato (FPS=60) o jogo nao se limita sozinho: o vsync do host segura
-// num monitor de 60 Hz; com vsync desligado ou monitor mais rapido, este limitador (timer de alta resolucao) segura
+// FPS limit from the .ini ([Video] FPS). With the immediate vblank (FPS=60) the game does not limit itself: the host vsync holds it
+// on a 60 Hz monitor; with vsync off or a faster monitor, this limiter (high-resolution timer) holds it
 static bool g_presentOccluded = false;
 
 static void LimitFrameRate()
@@ -2721,7 +2721,7 @@ static void LimitFrameRate()
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (next == 0 || now.QuadPart - next > period * 4)
-        next = now.QuadPart;   // recomeca depois de uma pausa longa
+        next = now.QuadPart;   // start over after a long pause
     next += period;
     for (;;)
     {
@@ -2732,7 +2732,7 @@ static void LimitFrameRate()
         if (timer && remaining > freq / 1000)
         {
             LARGE_INTEGER due;
-            due.QuadPart = -int64_t((remaining - freq / 2000) * 10000000 / freq);   // acorda 0,5 ms antes
+            due.QuadPart = -int64_t((remaining - freq / 2000) * 10000000 / freq);   // wake up 0.5 ms early
             SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
             WaitForSingleObject(timer, INFINITE);
         }
@@ -2749,7 +2749,7 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
         return;
     g_stats.swaps++;
     g_lastSwapTick = GetTickCount64();
-    // CARS_WATCH=endereco,tamanho (hex): a cada 10 frames loga quantos bytes nao-zero ha nessa regiao da memoria guest
+    // CARS_WATCH=address,size (hex): every 10 frames logs how many non-zero bytes this guest memory region has
     static const auto watch = [] {
         std::pair<uint32_t, uint32_t> w{ 0, 0 };
         if (const char* s = getenv("CARS_WATCH"))
@@ -2773,22 +2773,22 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
             nz += v != 0;
             sum += v;
         }
-        fprintf(stderr, "[watch] frame %llu: %08X: %u de %u palavras nao-zero (soma %016llX)\n", (unsigned long long)g_frameNumber,
+        fprintf(stderr, "[watch] frame %llu: %08X: %u of %u words non-zero (sum %016llX)\n", (unsigned long long)g_frameNumber,
                 watch.first, nz, watch.second / 4, (unsigned long long)sum);
     }
     {
-        // F12 (com a janela do jogo em foco): marca "algo estranho" no log de sessao (StartMark)
+        // F12 (with the game window focused): marks "something odd" in the session log (StartMark)
         static bool f12Down = false;
         const bool down = GetForegroundWindow() == g_hwnd && (GetAsyncKeyState(VK_F12) & 0x8000);
         if (down && !f12Down)
             StartMark();
         f12Down = down;
-        // F11: captura de modelos das cenas (liga / salva)
+        // F11: scene model capture (start / save)
         static bool f11Down = false;
         const bool down11 = GetForegroundWindow() == g_hwnd && (GetAsyncKeyState(VK_F11) & 0x8000);
-        static std::vector<double> modelsAt = [] {   // CARS_MODELOS_AT=segundos[,...]: o mesmo sem tecla (testes)
+        static std::vector<double> modelsAt = [] {   // CARS_MODELS_AT=seconds[,...]: the same without a key press (tests)
             std::vector<double> v;
-            for (const char* p = getenv("CARS_MODELOS_AT"); p && *p;)
+            for (const char* p = getenv("CARS_MODELS_AT"); p && *p;)
             {
                 char* end = nullptr;
                 v.push_back(strtod(p, &end));
@@ -2813,7 +2813,7 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
             SetWindowTextW(g_hwnd, capture::g_notice);
         }
         f11Down = down11;
-        // CARS_MARK_AT=segundos[,segundos...]: marca sem tecla (teste do log de sessao; nao mexe na entrada do jogo)
+        // CARS_MARK_AT=seconds[,seconds...]: mark without a key press (session log test; does not touch the game's input)
         static std::vector<double> markAt = [] {
             std::vector<double> v;
             for (const char* p = getenv("CARS_MARK_AT"); p && *p;)
@@ -2844,13 +2844,13 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
 
     auto it = g_resolved.find(frontbufferPhys & 0x1FFFFFFF);
     {
-        // diagnostico: troca de frontbuffer / frontbuffer sem conteudo
+        // diagnostics: frontbuffer change / frontbuffer without content
         static uint32_t lastFb = 0;
         static bool lastOk = true;
         const bool ok = it != g_resolved.end();
         if (frontbufferPhys != lastFb || ok != lastOk)
-            fprintf(stderr, "[swap] frame %llu: frontbuffer %08X %ux%u %s (resolves neste frame: %u)\n",
-                    (unsigned long long)g_frameNumber, frontbufferPhys, width, height, ok ? "com conteudo" : "SEM CONTEUDO",
+            fprintf(stderr, "[swap] frame %llu: frontbuffer %08X %ux%u %s (resolves this frame: %u)\n",
+                    (unsigned long long)g_frameNumber, frontbufferPhys, width, height, ok ? "with content" : "NO CONTENT",
                     g_resolvesThisFrame);
         lastFb = frontbufferPhys;
         lastOk = ok;
@@ -2871,7 +2871,7 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
             char path[64];
             snprintf(path, sizeof(path), "frame_%llu.png", (unsigned long long)g_frameNumber);
             DumpTexture(fb, width, height, CapturePath(path));
-            // CARS_DUMP_RESOLVE=007A9000,045CD000: salva tambem essas texturas de resolve
+            // CARS_DUMP_RESOLVE=007A9000,045CD000: also saves these resolve textures
             if (const char* list = getenv("CARS_DUMP_RESOLVE"))
                 for (const char* p = list; *p;)
                 {
@@ -2890,9 +2890,9 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
         }
         capture::Record(fb, width, height);
         Transition(fb, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        const uint32_t srv = GetSrv(fb, 0x688, false);   // identidade, sem a troca R/B do resolve (o video le o frontbuffer direto)
+        const uint32_t srv = GetSrv(fb, 0x688, false);   // identity, without the resolve R/B swap (video reads the frontbuffer directly)
         const D3D12_RESOURCE_DESC bd = bb->GetDesc();
-        // Mantem a proporcao do frontbuffer (letterbox)
+        // Keep the frontbuffer aspect ratio (letterbox)
         const float bw = float(bd.Width), bh = float(bd.Height);
         const float scale = std::min(bw / float(width), bh / float(height));
         const float vw = float(width) * scale, vh = float(height) * scale;
@@ -2917,20 +2917,20 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
     {
         ScopedMs timer(g_stats.presentMs);
         LimitFrameRate();
-        // janela minimizada/oculta: o present nao espera o vsync -> o limitador assume
+        // window minimized/hidden: present does not wait for vsync -> the limiter takes over
         g_presentOccluded = g_swapChain->Present(g_vsync ? 1 : 0, 0) == DXGI_STATUS_OCCLUDED;
     }
     g_queue->Signal(g_fence.Get(), ++g_fenceValue);
     g_frames[g_frameIndex].fence = g_fenceValue;
     capture::Submit(g_fenceValue);
-    // F12: fim do frame registrado
+    // F12: end of the recorded frame
     if (g_traceOut && g_frameNumber >= g_traceFrame)
     {
         fclose(g_traceOut);
         g_traceOut = nullptr;
         g_captureDir.clear();
     }
-    // Frontbuffer: paginas protegidas na memoria guest ate a CPU ler (ai a imagem e copiada da GPU, sob demanda)
+    // Frontbuffer: pages protected in guest memory until the CPU reads it (then the image is copied from the GPU, on demand)
     if (width && height)
     {
         auto fbIt = g_resolved.find(frontbufferPhys & 0x1FFFFFFF);
@@ -2947,7 +2947,7 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
     g_frameNumber++;
     BeginCommandList();
     MemWatchSetFrame(g_frameNumber);
-    // Pool do cache de VB/IB cheio: espera a GPU terminar tudo e recomeca (as copias sao refeitas sob demanda)
+    // VB/IB cache pool full: wait for the GPU to finish everything and start over (copies are redone on demand)
     if (g_poolUsed > kPoolBudget)
     {
         WaitForFence(g_fenceValue);
@@ -2956,10 +2956,10 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
         g_poolUsed = 0;
         g_vbCache.clear();
         g_ibCache.clear();
-        fprintf(stderr, "[gpu] cache de VB/IB cheio: recomecando\n");
+        fprintf(stderr, "[gpu] VB/IB cache full: starting over\n");
     }
 
-    // Titulo e estatisticas
+    // Title and statistics
     static auto last = std::chrono::steady_clock::now();
     static auto lastSwap = last;
     static uint64_t lastFrame = 0;
@@ -2979,13 +2979,13 @@ void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height)
         extern uint64_t GpuTakeCpBusyUs();
         extern uint64_t GpuTakeCpWaitUs();
         const double cpWaitMs = GpuTakeCpWaitUs() / 1000.0;
-        // trabalho real do CP = tempo dentro dos comandos - espera pela CPU (WAIT_REG_MEM) - present - espera da GPU do host
+        // real CP work = time inside the commands - waiting for the CPU (WAIT_REG_MEM) - present - waiting for the host GPU
         const double cpMs = GpuTakeCpBusyUs() / 1000.0 - cpWaitMs - g_stats.presentMs - g_stats.waitMs;
-        fprintf(stderr, "[gpu] %.1f fps (pior frame %.0f ms) | draws %u, sem shader %u, compilando %u, outros pulados %u, resolves %u, PSOs novos %u, uploads de textura %u%s"
-                        " | ms/s: CP trabalho %.0f (esperando CPU %.0f), draw %.0f (bind %.0f, hash %.0f, tex %.0f, vb %.0f, pso %.0f), present %.0f, espera GPU %.0f"
-                        " | shaders compilados %u (%.0f ms), varreduras %u (%.0f ms) | frontbuffer lido pela CPU %u | cache VB/IB: %u copias, %u escritas da CPU, %.0f MB\n",
+        fprintf(stderr, "[gpu] %.1f fps (worst frame %.0f ms) | draws %u, no shader %u, compiling %u, other skipped %u, resolves %u, new PSOs %u, texture uploads %u%s"
+                        " | ms/s: CP work %.0f (waiting for CPU %.0f), draw %.0f (bind %.0f, hash %.0f, tex %.0f, vb %.0f, pso %.0f), present %.0f, GPU wait %.0f"
+                        " | shaders compiled %u (%.0f ms), scans %u (%.0f ms) | frontbuffer read by CPU %u | VB/IB cache: %u copies, %u CPU writes, %.0f MB\n",
                 fps, g_stats.worstFrameMs, g_stats.draws, g_stats.skippedShader, g_stats.pendingShader, g_stats.skippedOther, g_stats.resolves,
-                g_stats.psos, g_stats.texUploads, it != g_resolved.end() ? "" : " (frontbuffer ainda nao resolvido)", cpMs, cpWaitMs, g_stats.drawMs,
+                g_stats.psos, g_stats.texUploads, it != g_resolved.end() ? "" : " (frontbuffer not resolved yet)", cpMs, cpWaitMs, g_stats.drawMs,
                 g_stats.bindMs, g_stats.hashMs, g_stats.texMs, g_stats.vbMs, g_stats.psoMs, g_stats.presentMs, g_stats.waitMs, compiled,
                 compileMs, scans, scanMs, g_fbReadbacks.exchange(0), g_cacheUploads, MemWatchTakeFaults(), g_poolUsed / 1048576.0);
         g_cacheUploads = 0;

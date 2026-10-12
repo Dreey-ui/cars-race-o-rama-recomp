@@ -1,4 +1,4 @@
-// Threads, sincronização, TLS, spinlocks e critical sections
+// Threads, synchronization, TLS, spinlocks and critical sections
 #include "kernel.h"
 
 #include <chrono>
@@ -42,7 +42,7 @@ KERNEL_IMPORT(KeUnlockL2)                        { }
 KERNEL_IMPORT(KeEnableFpuExceptions)             { ctx.r3.u64 = 0; }
 KERNEL_IMPORT(KeGetCurrentProcessType)           { ctx.r3.u64 = 1; }
 
-// TLS dinâmico: 64 slots, valores por thread guest
+// Dynamic TLS: 64 slots, values per guest thread
 static std::mutex g_tlsMutex;
 static bool g_tlsUsed[64];
 
@@ -86,7 +86,7 @@ KERNEL_IMPORT(KeTlsSetValue)
     ctx.r3.u64 = 1;
 }
 
-// Eventos
+// Events
 static KObjectPtr NewEvent(bool manual, bool initial)
 {
     auto o = std::make_shared<KObject>();
@@ -98,7 +98,7 @@ static KObjectPtr NewEvent(bool manual, bool initial)
 
 KERNEL_IMPORT(NtCreateEvent)
 {
-    // (PHANDLE, ATTRIBUTES, 0=notificação 1=sincronização, estado inicial)
+    // (PHANDLE, ATTRIBUTES, 0=notification 1=synchronization, initial state)
     const bool manual = ctx.r5.u32 == 0;
     const bool initial = (ctx.r6.u32 & 0xFF) != 0;
     const uint32_t h = KNewHandle(NewEvent(manual, initial));
@@ -136,7 +136,7 @@ KERNEL_IMPORT(KeResetEvent)
     o->signaled = false;
 }
 
-// Semáforos
+// Semaphores
 KERNEL_IMPORT(KeInitializeSemaphore)
 {
     const uint32_t p = ctx.r3.u32;
@@ -191,17 +191,17 @@ KERNEL_IMPORT(NtReleaseMutant)
     RetStatus(ctx, STATUS_SUCCESS);
 }
 
-// Esperas
+// Waits
 KERNEL_IMPORT(NtWaitForSingleObjectEx)
 {
-    // (handle, modo, alertavel, timeout*)
+    // (handle, mode, alertable, timeout*)
     if (ctx.r5.u32 && KDeliverApcs(ctx)) { RetStatus(ctx, STATUS_USER_APC); return; }
     auto o = KGetHandle(ctx.r3.u32);
     if (!o) { RetStatus(ctx, STATUS_INVALID_HANDLE); return; }
     const uint32_t st = KWait({ o }, false, KTimeoutFromGuest(ctx.r6.u32));
     if (g_traceImports)
     {
-        // Histograma de esperas (diagnostico de polling)
+        // Wait histogram (polling diagnostics)
         static std::mutex m;
         static std::unordered_map<uint64_t, uint32_t> hist;
         static auto last = std::chrono::steady_clock::now();
@@ -211,7 +211,7 @@ KERNEL_IMPORT(NtWaitForSingleObjectEx)
         {
             for (auto& [k, n] : hist)
                 if (n > 20)
-                    fprintf(stderr, "[esperas] handle %08X status %08X: %u vezes em 10s (tipo %d, timeout %lld ms, lr %08X)\n",
+                    fprintf(stderr, "[waits] handle %08X status %08X: %u times in 10s (type %d, timeout %lld ms, lr %08X)\n",
                             uint32_t(k >> 32), uint32_t(k), n, (int)o->type, (long long)KTimeoutFromGuest(ctx.r6.u32), uint32_t(ctx.lr));
             hist.clear();
             last = std::chrono::steady_clock::now();
@@ -228,7 +228,7 @@ KERNEL_IMPORT(KeWaitForSingleObject)
 
 KERNEL_IMPORT(NtWaitForMultipleObjectsEx)
 {
-    // (n, handles, tipo, modo, alertavel, timeout*)
+    // (n, handles, type, mode, alertable, timeout*)
     if (ctx.r7.u32 && KDeliverApcs(ctx)) { RetStatus(ctx, STATUS_USER_APC); return; }
     std::vector<KObjectPtr> objs;
     for (uint32_t i = 0; i < ctx.r3.u32; i++)
@@ -250,7 +250,7 @@ KERNEL_IMPORT(KeWaitForMultipleObjects)
 
 KERNEL_IMPORT(KeDelayExecutionThread)
 {
-    // (modo, alertavel, intervalo*)
+    // (mode, alertable, interval*)
     if (ctx.r4.u32 && KDeliverApcs(ctx)) { RetStatus(ctx, STATUS_USER_APC); return; }
     const int64_t ms = KTimeoutFromGuest(ctx.r5.u32);
     if (ms > 0)
@@ -295,7 +295,7 @@ KERNEL_IMPORT(KeResumeThread)
     ctx.r3.u64 = o->type == KType::Thread ? ResumeThreadObj(o) : 0;
 }
 
-// (KTHREAD*, mascara de afinidade, mascara anterior*): o processador "atual" passa a ser o menor bit da mascara
+// (KTHREAD*, affinity mask, previous mask*): the "current" processor becomes the lowest bit of the mask
 KERNEL_IMPORT(KeSetAffinityThread)
 {
     const uint32_t mask = ctx.r4.u32 & 0x3F;
@@ -315,7 +315,7 @@ KERNEL_IMPORT(KeSetAffinityThread)
     KSetThreadCpu(gt, uint32_t(__builtin_ctz(mask)));
     static std::atomic<int> logged{ 0 };
     if (logged++ < 40)
-        fprintf(stderr, "[cpu] thread %u (entrada %08X) -> processador %u\n", gt->threadId, gt->entry, KGetThreadCpu(gt));
+        fprintf(stderr, "[cpu] thread %u (entry %08X) -> processor %u\n", gt->threadId, gt->entry, KGetThreadCpu(gt));
     RetStatus(ctx, STATUS_SUCCESS);
 }
 KERNEL_IMPORT(KeSetBasePriorityThread)  { ctx.r3.u64 = 0; }
@@ -325,7 +325,7 @@ KERNEL_IMPORT(ExTerminateThread)
     GuestThread* gt = CurrentThread();
     if (gt && gt->threadId == 1)
     {
-        printf("[kernel] a thread principal chamou ExTerminateThread(%u): encerrando\n", ctx.r3.u32);
+        printf("[kernel] the main thread called ExTerminateThread(%u): exiting\n", ctx.r3.u32);
         fflush(stdout);
         exit(0);
     }

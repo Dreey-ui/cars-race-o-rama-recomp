@@ -1,4 +1,4 @@
-// Arquivos: mapeia game:\ e \Device\Cdrom0\ para a pasta do jogo no PC
+// Files: maps game:\ and \Device\Cdrom0\ to the game folder on the PC
 #include "kernel.h"
 #include "gpu/memwatch.h"
 #include "scene_assets.h"
@@ -40,8 +40,8 @@ static std::string Lower(std::string s)
     return s;
 }
 
-// Converte o caminho do Xbox em caminho do PC. Retorna false se o dispositivo não é conhecido.
-bool XamResolveContentPath(const std::string& xboxPath, fs::path& out);   // kernel_xam.cpp: saves montados (save:\)
+// Converts an Xbox path into a PC path. Returns false if the device is unknown.
+bool XamResolveContentPath(const std::string& xboxPath, fs::path& out);   // kernel_xam.cpp: mounted saves (Cars:\)
 
 static bool ResolvePath(const std::string& xboxPath, fs::path& out)
 {
@@ -67,7 +67,7 @@ static bool ResolvePath(const std::string& xboxPath, fs::path& out)
             return true;
         }
     }
-    // Sem prefixo: relativo à raiz do jogo
+    // No prefix: relative to the game root
     if (l.find(':') == std::string::npos && !l.empty() && l[0] != '/')
     {
         out = fs::path(g_gameRoot) / fs::path(p);
@@ -76,10 +76,10 @@ static bool ResolvePath(const std::string& xboxPath, fs::path& out)
     return false;
 }
 
-// ---- Pasta de mods ----
-// <pasta do exe>\mods (ou CARS_MODS) espelha a pasta do jogo: um arquivo que existe la e usado no lugar do original
-// (os arquivos da ISO nunca sao alterados). Scripts: "X.lua" em texto substitui "X.lua.bin" (o runtime monta o .lua.bin
-// na hora: 4 bytes big-endian com o tamanho + o codigo-fonte, que o parser Lua do proprio jogo compila).
+// ---- Mods folder ----
+// <exe folder>\mods (or CARS_MODS) mirrors the game folder: a file that exists there is used instead of the original
+// (the ISO files are never changed). Scripts: a text "X.lua" replaces "X.lua.bin" (the runtime builds the .lua.bin
+// on the fly: 4 big-endian bytes with the size + the source code, which the game's own Lua parser compiles).
 static const fs::path& ModsRoot()
 {
     static const fs::path root = [] {
@@ -94,29 +94,29 @@ static const fs::path& ModsRoot()
 
 struct ModFile
 {
-    fs::path path;            // arquivo do mod (vazio se luaSource)
+    fs::path path;            // mod file (empty if luaSource)
     bool isLuaSource = false;
-    std::string luaSource;    // codigo Lua em texto (vira um .lua.bin)
-    bool isResFolder = false; // pasta "X.res" / "X.str" extraida (tools/scenes_extract.py): montada por scene_assets.cpp
+    std::string luaSource;    // Lua source text (becomes a .lua.bin)
+    bool isResFolder = false; // extracted "X.res" / "X.str" folder (tools/scenes_extract.py): built by scene_assets.cpp
     bool isStrFolder = false;
-    bool isLoose = false;     // cena em arquivos soltos (<pasta>\_pacote\X.soi/.toc + geo/tex/col): scene_assets.cpp
+    bool isLoose = false;     // scene as loose files (<folder>\_package\X.soi/.toc + geo/tex/col): scene_assets.cpp
     bool looseStream = false;
     fs::path loosePack;
     std::string looseStem;
 };
 
-// ---- Streams das cenas sem zlib (pasta X.str montada por scene_assets.cpp, ou .str cru) ----
-// O leitor de stream do jogo (sub_820B0398) le cada bloco para um buffer e a thread de jobs (sub_820B02F8) chama o
-// uncompress (sub_822702F8). Para um stream cru, cada leitura e registrada aqui e o hook do uncompress (game_hooks.cpp)
-// copia o bloco em vez de descomprimir.
+// ---- Scene streams without zlib (X.str folder built by scene_assets.cpp, or a raw .str) ----
+// The game's stream reader (sub_820B0398) reads each block into a buffer and the job thread (sub_820B02F8) calls
+// uncompress (sub_822702F8). For a raw stream, each read is registered here and the uncompress hook (game_hooks.cpp)
+// copies the block instead of decompressing it.
 struct RawRead
 {
     uint32_t size;
-    std::string path;      // pasta/arquivo do stream (para a captura de modelos saber de onde veio cada bloco)
-    uint64_t offset;       // posicao no stream
+    std::string path;      // stream folder/file (so model capture knows where each block came from)
+    uint64_t offset;       // position in the stream
 };
 static std::mutex g_rawMutex;
-static std::map<uint32_t, RawRead> g_rawBuffers;   // endereco guest -> bytes lidos de um stream cru
+static std::map<uint32_t, RawRead> g_rawBuffers;   // guest address -> bytes read from a raw stream
 static std::atomic<bool> g_rawUsed{ false };
 
 static void RawStreamRegister(uint32_t buffer, uint32_t size, const std::string& path, uint64_t offset)
@@ -130,7 +130,7 @@ static void RawStreamRegister(uint32_t buffer, uint32_t size, const std::string&
 
 bool RawStreamActive() { return g_rawUsed.load(); }
 
-// true se src recebeu dados de um stream cru: size = bytes contiguos lidos a partir de src; path/offset = de onde vieram
+// true if src received data from a raw stream: size = contiguous bytes read from src; path/offset = where they came from
 bool RawStreamTake(uint32_t src, uint32_t& size, std::string& path, uint64_t& offset)
 {
     std::lock_guard<std::mutex> lock(g_rawMutex);
@@ -148,8 +148,8 @@ bool RawStreamTake(uint32_t src, uint32_t& size, std::string& path, uint64_t& of
     return true;
 }
 
-// mods\<caminho>.nao_existe esconde o arquivo original do jogo (ex.: pacote .res/.str de uma cena montada so com
-// arquivos soltos .xng/.dds/.xnm e o .scn completo)
+// mods\<path>.hidden hides the game's original file (e.g. the .res/.str package of a scene built only from
+// loose .xng/.dds/.xnm files and the complete .scn)
 static bool HiddenByMods(const fs::path& gamePath)
 {
     std::error_code ec;
@@ -160,7 +160,7 @@ static bool HiddenByMods(const fs::path& gamePath)
     if (rel.empty() || *rel.begin() == "..")
         return false;
     fs::path marker = ModsRoot() / rel;
-    marker += L".nao_existe";
+    marker += L".hidden";
     return fs::exists(marker, ec);
 }
 
@@ -199,7 +199,7 @@ static bool FindModOverride(const fs::path& gamePath, ModFile& out)
             out.looseStream = isStr;
             out.loosePack = direct.parent_path();
             out.looseStem = stem;
-            out.path = out.loosePack / L"_pacote";
+            out.path = out.loosePack / L"_package";
             return true;
         }
     }
@@ -228,7 +228,7 @@ static bool FindModOverride(const fs::path& gamePath, ModFile& out)
 
 static std::string ObjectAttributesPath(uint32_t objAttr)
 {
-    // OBJECT_ATTRIBUTES: +0 root dir, +4 ponteiro p/ ANSI_STRING nome, +8 atributos
+    // OBJECT_ATTRIBUTES: +0 root dir, +4 pointer to the ANSI_STRING name, +8 attributes
     return KReadGuestAnsi(R32(objAttr + 4));
 }
 
@@ -253,7 +253,7 @@ static void SignalEvent(uint32_t eventHandle)
     }
 }
 
-// Log de sessao: cada arquivo que o jogo abre (ate 10 vezes o mesmo caminho) mostra em que parte do jogo ele estava
+// Session log: every file the game opens (up to 10 times per path) shows which part of the game it was in
 static void LogFileOpen(const std::string& xpath, bool exists, bool write)
 {
     static std::mutex mutex;
@@ -261,8 +261,8 @@ static void LogFileOpen(const std::string& xpath, bool exists, bool write)
     std::lock_guard<std::mutex> lock(mutex);
     const int n = ++counts[xpath];
     if (n <= 10)
-        fprintf(stderr, "[arquivo] %s%s%s%s\n", xpath.c_str(), write ? " (escrita)" : "", exists ? "" : " (nao existe)",
-                n == 10 ? " (proximas aberturas deste arquivo nao aparecem mais)" : "");
+        fprintf(stderr, "[file] %s%s%s%s\n", xpath.c_str(), write ? " (write)" : "", exists ? "" : " (missing)",
+                n == 10 ? " (further opens of this file are not shown)" : "");
 }
 
 static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uint32_t objAttr, uint32_t iosb, uint32_t disposition,
@@ -273,25 +273,25 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
     if (!ResolvePath(xpath, path))
     {
         if (g_traceImports)
-            fprintf(stderr, "[io] dispositivo desconhecido: %s\n", xpath.c_str());
+            fprintf(stderr, "[io] unknown device: %s\n", xpath.c_str());
         SetIoStatus(iosb, STATUS_NAME_NOT_FOUND, 0);
         return STATUS_NAME_NOT_FOUND;
     }
 
     std::error_code ec;
     const bool wantsWriteAccess = (access & (0x40000000 | 0x2 | 0x4 | 0x10000000)) != 0;
-    // Mod: so para leitura de arquivo que o jogo abre (OPEN / OPEN_IF)
+    // Mod: only for files the game opens for reading (OPEN / OPEN_IF)
     ModFile mod;
     if (!wantsWriteAccess && HiddenByMods(path))
     {
-        fprintf(stderr, "[mods] %s escondido (.nao_existe)\n", xpath.c_str());
+        fprintf(stderr, "[mods] %s hidden (.hidden)\n", xpath.c_str());
         SetIoStatus(iosb, STATUS_NAME_NOT_FOUND, 0);
         return STATUS_NAME_NOT_FOUND;
     }
     const bool modded = !wantsWriteAccess && (disposition == 1 || disposition == 3) && FindModOverride(path, mod);
     if (modded)
     {
-        fprintf(stderr, "[mods] %s -> %s%s\n", xpath.c_str(), mod.path.string().c_str(), mod.isLuaSource ? " (Lua em texto)" : "");
+        fprintf(stderr, "[mods] %s -> %s%s\n", xpath.c_str(), mod.path.string().c_str(), mod.isLuaSource ? " (Lua source)" : "");
         auto obj = std::make_shared<KObject>();
         obj->type = KType::File;
         if (mod.isLoose)
@@ -337,7 +337,7 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
                 FSEEK64(obj->file, 0, SEEK_END);
                 obj->size = (uint64_t)FTELL64(obj->file);
                 FSEEK64(obj->file, 0, SEEK_SET);
-                // .str extraido (blocos crus): tem a pasta X.res ao lado (tools/scenes_extract.py) ou nao comeca com zlib
+                // extracted .str (raw blocks): has the X.res folder next to it (tools/scenes_extract.py) or does not start with zlib
                 const std::string ext = Lower(mod.path.extension().string());
                 uint8_t head[2] = {};
                 fs::path resFolder = mod.path;
@@ -347,7 +347,7 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
                 {
                     obj->rawStream = true;
                     g_rawUsed = true;
-                    fprintf(stderr, "[mods] stream cru (sem zlib): %s\n", mod.path.string().c_str());
+                    fprintf(stderr, "[mods] raw stream (no zlib): %s\n", mod.path.string().c_str());
                 }
                 FSEEK64(obj->file, 0, SEEK_SET);
             }
@@ -364,8 +364,8 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
     const bool exists = fs::exists(path, ec);
     const bool isDir = exists && fs::is_directory(path, ec);
     if (g_traceImports)
-        fprintf(stderr, "[io] abrir '%s' -> %s (%s) disp=%u acesso=%08X\n", xpath.c_str(), path.string().c_str(),
-                exists ? (isDir ? "diretorio" : "existe") : "nao existe", disposition, access);
+        fprintf(stderr, "[io] open '%s' -> %s (%s) disp=%u access=%08X\n", xpath.c_str(), path.string().c_str(),
+                exists ? (isDir ? "directory" : "exists") : "missing", disposition, access);
     else if (!isDir)
         LogFileOpen(xpath, exists, wantsWriteAccess);
 
@@ -374,7 +374,7 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
     obj->path = path.string();
 
     uint32_t info = 1;   // FILE_OPENED
-    // FILE_DIRECTORY_FILE: criar/abrir uma pasta (saves)
+    // FILE_DIRECTORY_FILE: create/open a folder (saves)
     if (!exists && (options & 1) && disposition != 1)
     {
         if (!fs::create_directories(path, ec) && !fs::is_directory(path, ec))
@@ -413,7 +413,7 @@ static uint32_t DoOpen(PPCContext& ctx, uint32_t handleOut, uint32_t access, uin
         }
         if (!exists || mode[0] == L'w')
             fs::create_directories(path.parent_path(), ec);
-        obj->file = _wfopen(path.c_str(), mode);   // caminho largo: Documentos com acento no nome do usuario
+        obj->file = _wfopen(path.c_str(), mode);   // wide path: folders with accented characters in the user name
         if (!obj->file)
         {
             SetIoStatus(iosb, STATUS_NAME_NOT_FOUND, 0);
@@ -440,7 +440,7 @@ KERNEL_IMPORT(RtlInitAnsiString)
 
 KERNEL_IMPORT(NtCreateFile)
 {
-    // (handle*, access, objattr*, iosb*, allocSize*, attributes, share, disposition, [pilha] options)
+    // (handle*, access, objattr*, iosb*, allocSize*, attributes, share, disposition, [stack] options)
     RetStatus(ctx, DoOpen(ctx, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r10.u32, R32(ctx.r1.u32 + 0x54)));
 }
 
@@ -472,13 +472,13 @@ KERNEL_IMPORT(NtReadFile)
                 FSEEK64(obj->file, off, SEEK_SET);
         }
         where = FTELL64(obj->file);
-        // ReadFile do Windows nao gera excecao em pagina protegida: libera as paginas vigiadas pelo cache da GPU antes
+        // Windows ReadFile raises no exception on a protected page: unprotect the pages watched by the GPU cache first
         MemWatchInvalidate(buffer, length);
         got = fread(g_mem.base + buffer, 1, length, obj->file);
     }
     if (obj->rawStream && got)
         RawStreamRegister(buffer, uint32_t(got), obj->path, uint64_t(where));
-    // CARS_LOG_READS=texto[;texto]: loga as leituras de arquivos cujo caminho contem um dos textos (offset, tamanho, chamador)
+    // CARS_LOG_READS=text[;text]: logs reads of files whose path contains one of the texts (offset, size, caller)
     static const std::vector<std::string> logReads = [] {
         std::vector<std::string> v;
         if (const char* s = getenv("CARS_LOG_READS"))
@@ -505,13 +505,13 @@ KERNEL_IMPORT(NtReadFile)
                 sp = next;
             }
             stack[n] = 0;
-            fprintf(stderr, "[leitura] %s off %08llX tam %X -> %zX em %08X lr=%08X |%s\n", obj->path.c_str(), (long long)where, length,
+            fprintf(stderr, "[read] %s off %08llX size %X -> %zX at %08X lr=%08X |%s\n", obj->path.c_str(), (long long)where, length,
                     got, buffer, uint32_t(ctx.lr), stack);
             break;
         }
     const uint32_t status = (got == 0 && length > 0) ? STATUS_END_OF_FILE_ : STATUS_SUCCESS;
     SetIoStatus(iosb, status, (uint32_t)got);
-    // Rotina de conclusao (ReadFileEx): entregue como APC na proxima espera alertavel (bit 0 = nao usar porta de I/O)
+    // Completion routine (ReadFileEx): delivered as an APC on the next alertable wait (bit 0 = do not use an I/O port)
     if ((ctx.r5.u32 & ~1u) && ctx.r6.u32 && status == STATUS_SUCCESS)
         KQueueApc(ctx.r5.u32 & ~1u, ctx.r6.u32, iosb, 0);
     SignalEvent(ctx.r4.u32);
@@ -553,7 +553,7 @@ static void FillNetworkOpenInfo(uint32_t p, uint64_t size, bool dir)
         W32(p + i, 0);
     W64(p + 0x20, (size + 0xFFF) & ~0xFFFull);   // AllocationSize
     W64(p + 0x28, size);                          // EndOfFile
-    W32(p + 0x30, dir ? 0x10 : 0x80);             // atributos
+    W32(p + 0x30, dir ? 0x10 : 0x80);             // attributes
 }
 
 KERNEL_IMPORT(NtQueryInformationFile)
@@ -597,7 +597,7 @@ KERNEL_IMPORT(NtQueryInformationFile)
         break;
     default:
         if (g_traceImports)
-            fprintf(stderr, "[io] NtQueryInformationFile classe %u nao suportada\n", cls);
+            fprintf(stderr, "[io] NtQueryInformationFile class %u not supported\n", cls);
         SetIoStatus(iosb, 0xC0000003, 0);   // STATUS_INVALID_INFO_CLASS
         RetStatus(ctx, 0xC0000003);
         return;
@@ -634,9 +634,9 @@ KERNEL_IMPORT(NtSetInformationFile)
                 obj->size = uint64_t(size);
         }
     }
-    else if (cls == 13)   // FileDispositionInformation: apagar ao fechar
+    else if (cls == 13)   // FileDispositionInformation: delete when closed
         obj->deleteOnClose = R8(info) != 0;
-    else if (cls == 10)   // FileRenameInformation {u32 replace, u32 root, ANSI_STRING nome}
+    else if (cls == 10)   // FileRenameInformation {u32 replace, u32 root, ANSI_STRING name}
     {
         fs::path to;
         if (ResolvePath(KReadGuestAnsi(info + 8), to))
@@ -680,7 +680,7 @@ KERNEL_IMPORT(NtQueryFullAttributesFile)
     }
     if (FindModOverride(path, mod) && (!mod.isLoose || LooseSceneSize(ModsRoot(), mod.loosePack, mod.looseStem, mod.looseStream, size0)))
     {
-        uint64_t size = size0;   // cena solta: tamanho do arquivo montado
+        uint64_t size = size0;   // loose scene: size of the built file
         if (mod.isLoose)
         {
         }
@@ -712,10 +712,10 @@ KERNEL_IMPORT(NtQueryVolumeInformationFile)
         W32(info + i, 0);
     if (cls == 3)   // FileFsSizeInformation
     {
-        W64(info + 0x00, 0x400000);   // unidades totais
-        W64(info + 0x08, 0x200000);   // unidades livres
-        W32(info + 0x10, 8);          // setores por unidade
-        W32(info + 0x14, 0x800);      // bytes por setor
+        W64(info + 0x00, 0x400000);   // total units
+        W64(info + 0x08, 0x200000);   // free units
+        W32(info + 0x10, 8);          // sectors per unit
+        W32(info + 0x14, 0x800);      // bytes per sector
     }
     SetIoStatus(iosb, STATUS_SUCCESS, len < 0x18 ? len : 0x18);
     RetStatus(ctx, STATUS_SUCCESS);

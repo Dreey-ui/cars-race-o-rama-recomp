@@ -1,11 +1,11 @@
-// Captura de modelos das cenas pela GPU emulada (veja model_capture.h).
-// Cada bloco do stream de uma cena extraida que o jogo copia para a memoria (hook do uncompress) fica registrado com a
-// sua posicao no stream; num draw, o endereco do vertex buffer da POSITION mostra se a malha vem de uma cena. A malha e
-// lida da memoria guest com o formato dos vfetch do vertex shader (POSITION, NORMAL, TEXCOORD0, COLOR0), os indices sao
-// convertidos para lista de triangulos e a textura do sampler 0 do pixel shader e achada pela posicao no stream
-// (nome do .dds da pasta). Cada malha e gravada uma vez (VB + IB + contagem); instancias repetidas sao ignoradas.
-// Coordenadas: as do vertex buffer (o .soi traz matriz identidade para a geometria da cena), com Z invertido para o
-// sistema de mao direita do .obj (a ordem dos triangulos tambem e invertida).
+// Scene model capture through the emulated GPU (see model_capture.h).
+// Each block of an extracted scene's stream that the game copies into memory (uncompress hook) is registered with its
+// stream position; on a draw, the address of the POSITION vertex buffer tells whether the mesh comes from a scene. The mesh is
+// read from guest memory with the vertex shader's vfetch formats (POSITION, NORMAL, TEXCOORD0, COLOR0), the indices are
+// converted to a triangle list and the texture of the pixel shader's sampler 0 is found by its stream position
+// (name of the folder's .dds). Each mesh is written once (VB + IB + count); repeated instances are ignored.
+// Coordinates: those of the vertex buffer (the .soi has an identity matrix for scene geometry), with Z flipped for the
+// right-handed .obj system (the triangle winding is flipped too).
 #include "model_capture.h"
 #include "renderer.h"
 #include "shaders.h"
@@ -38,8 +38,8 @@ struct Block
     uint64_t offset;
 };
 std::mutex g_mapMutex;
-std::map<uint32_t, Block> g_blocks;                                // endereco guest -> bloco do stream
-std::map<std::pair<std::string, uint64_t>, std::string> g_texNames;   // (stream, posicao) -> .dds
+std::map<uint32_t, Block> g_blocks;                                // guest address -> stream block
+std::map<std::pair<std::string, uint64_t>, std::string> g_texNames;   // (stream, position) -> .dds
 
 struct Mesh
 {
@@ -48,7 +48,7 @@ struct Mesh
     std::string texture;
     std::vector<float> pos, nrm, uv, col;
     std::vector<uint32_t> tris;
-    std::string info;   // layout do draw (comentarios no .obj: formatos dos vfetch, contagens, primitiva)
+    std::string info;   // draw layout (comments in the .obj: vfetch formats, counts, primitive)
 };
 std::mutex g_meshMutex;
 std::vector<Mesh> g_meshes;
@@ -117,7 +117,7 @@ uint32_t ElementSize(uint32_t format)
     }
 }
 
-// Elemento de vertice do Xenos (bytes ja em little-endian) -> ate 4 floats; devolve o numero de componentes
+// Xenos vertex element (bytes already little-endian) -> up to 4 floats; returns the component count
 int Decode(const ShaderVertexInput& in, const uint8_t* p, float out[4])
 {
     auto u32 = [&](int i) { uint32_t v; memcpy(&v, p + 4 * i, 4); return v; };
@@ -185,7 +185,7 @@ int Decode(const ShaderVertexInput& in, const uint8_t* p, float out[4])
         for (int i = 0; i < n; i++)
             memcpy(&out[i], p + 4 * i, 4);
         break;
-    case 33: case 34: case 35:   // 32 / 32_32 / 32_32_32_32 inteiros
+    case 33: case 34: case 35:   // 32 / 32_32 / 32_32_32_32 integers
         n = in.format == 33 ? 1 : in.format == 34 ? 2 : 4;
         for (int i = 0; i < n; i++)
             out[i] = in.isSigned ? norm(int32_t(u32(i)), 32, true) : norm(int64_t(u32(i)), 32, false);
@@ -220,11 +220,11 @@ void WriteMesh(const Mesh& m, const fs::path& file)
     FILE* f = _wfopen(file.c_str(), L"wb");
     if (!f)
         return;
-    const std::string mtl = m.texture.empty() ? "sem_textura" : Sanitize(m.texture.substr(0, m.texture.size() - 4));
-    fprintf(f, "# malha do stream em %llX (indices em %llX), capturada pela GPU (F11)\n", (unsigned long long)m.vbOffset,
+    const std::string mtl = m.texture.empty() ? "no_texture" : Sanitize(m.texture.substr(0, m.texture.size() - 4));
+    fprintf(f, "# stream mesh at %llX (indices at %llX), captured by the GPU (F11)\n", (unsigned long long)m.vbOffset,
             (unsigned long long)m.ibOffset);
     fputs(m.info.c_str(), f);
-    fprintf(f, "mtllib ../materiais.mtl\no malha_%llX\n", (unsigned long long)m.vbOffset);
+    fprintf(f, "mtllib ../materials.mtl\no mesh_%llX\n", (unsigned long long)m.vbOffset);
     const size_t nv = m.pos.size() / 3;
     for (size_t i = 0; i < nv; i++)
     {
@@ -242,25 +242,25 @@ void WriteMesh(const Mesh& m, const fs::path& file)
     fprintf(f, "usemtl %s\n", mtl.c_str());
     for (size_t t = 0; t + 2 < m.tris.size(); t += 3)
     {
-        const uint32_t a = m.tris[t] + 1, b = m.tris[t + 2] + 1, c = m.tris[t + 1] + 1;   // ordem invertida (Z invertido)
+        const uint32_t a = m.tris[t] + 1, b = m.tris[t + 2] + 1, c = m.tris[t + 1] + 1;   // flipped winding (Z flipped)
         fprintf(f, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", a, a, a, b, b, b, c, c, c);
     }
     fclose(f);
 }
 
-// Junta todas as malhas de _modelos\malhas (desta e de capturas anteriores) num .obj so
+// Merges all meshes in _models\meshes (from this and earlier captures) into a single .obj
 void WriteCombined(const fs::path& dir, const std::string& scene)
 {
     std::error_code ec;
     std::vector<fs::path> files;
-    for (const auto& e : fs::directory_iterator(dir / L"malhas", ec))
+    for (const auto& e : fs::directory_iterator(dir / L"meshes", ec))
         if (e.path().extension() == L".obj")
             files.push_back(e.path());
     std::sort(files.begin(), files.end());
     FILE* out = _wfopen((dir / (scene + ".obj")).c_str(), L"wb");
     if (!out)
         return;
-    fprintf(out, "# %s: %zu malhas capturadas (F11). Cada malha tambem esta em malhas\\\nmtllib materiais.mtl\n", scene.c_str(), files.size());
+    fprintf(out, "# %s: %zu captured meshes (F11). Each mesh is also in meshes\\\nmtllib materials.mtl\n", scene.c_str(), files.size());
     uint64_t base = 0;
     char line[512];
     for (const auto& p : files)
@@ -293,11 +293,11 @@ void WriteCombined(const fs::path& dir, const std::string& scene)
 
 void WriteMaterials(const fs::path& dir)
 {
-    // materiais de todas as malhas da pasta (lidos dos usemtl): map_Kd aponta para o .dds da pasta do stream
+    // materials of all meshes in the folder (read from the usemtl lines): map_Kd points to the .dds in the stream folder
     std::error_code ec;
     std::set<std::string> mats;
     char line[512];
-    for (const auto& e : fs::directory_iterator(dir / L"malhas", ec))
+    for (const auto& e : fs::directory_iterator(dir / L"meshes", ec))
         if (FILE* in = _wfopen(e.path().c_str(), L"rb"))
         {
             while (fgets(line, sizeof(line), in))
@@ -310,7 +310,7 @@ void WriteMaterials(const fs::path& dir)
                 }
             fclose(in);
         }
-    // nome sanitizado -> caminho do .dds (o mesmo usado pelos .dds da pasta)
+    // sanitized name -> path of the .dds (the same one used by the folder's .dds files)
     std::map<std::string, std::string> paths;
     for (fs::recursive_directory_iterator it(dir.parent_path(), ec), end; !ec && it != end; it.increment(ec))
         if (it->path().extension() == L".dds")
@@ -318,7 +318,7 @@ void WriteMaterials(const fs::path& dir)
             std::string rel = it->path().lexically_relative(dir.parent_path()).string();
             paths[Sanitize(rel.substr(0, rel.size() - 4))] = rel;
         }
-    FILE* f = _wfopen((dir / L"materiais.mtl").c_str(), L"wb");
+    FILE* f = _wfopen((dir / L"materials.mtl").c_str(), L"wb");
     if (!f)
         return;
     for (const auto& m : mats)
@@ -349,23 +349,23 @@ size_t Save(const std::vector<Mesh>& meshes)
     std::set<std::string> streams;
     for (const auto& m : meshes)
     {
-        const fs::path dir = fs::path(m.stream) / L"_modelos";
+        const fs::path dir = fs::path(m.stream) / L"_models";
         std::error_code ec;
-        fs::create_directories(dir / L"malhas", ec);
+        fs::create_directories(dir / L"meshes", ec);
         char name[64];
         snprintf(name, sizeof(name), "%08llX_%08llX.obj", (unsigned long long)m.vbOffset, (unsigned long long)m.ibOffset);
-        WriteMesh(m, dir / L"malhas" / name);
+        WriteMesh(m, dir / L"meshes" / name);
         streams.insert(m.stream);
     }
     for (const auto& s : streams)
     {
-        const fs::path dir = fs::path(s) / L"_modelos";
+        const fs::path dir = fs::path(s) / L"_models";
         std::string scene = fs::path(s).filename().string();
         if (scene.size() > 9)
-            scene.resize(scene.size() - 9);   // tira ".x360.str"
+            scene.resize(scene.size() - 9);   // strip ".x360.str"
         WriteMaterials(dir);
         WriteCombined(dir, scene);
-        fprintf(stderr, "[modelos] %s: malhas salvas em %s\n", scene.c_str(), dir.string().c_str());
+        fprintf(stderr, "[models] %s: meshes saved to %s\n", scene.c_str(), dir.string().c_str());
     }
     return meshes.size();
 }
@@ -417,11 +417,11 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
     }
     Mesh m;
     if (!vb || !Resolve(vb, m.stream, m.vbOffset))
-        return;   // geometria que nao vem de uma cena extraida (carros, interface...)
+        return;   // geometry that does not come from an extracted scene (cars, UI...)
     std::string ibStream;
     if (ib)
         Resolve(ib, ibStream, m.ibOffset);
-    // indices -> lista de triangulos
+    // indices -> triangle list
     const uint32_t n = draw.numIndices;
     const bool restart = draw.indexed && (draw.primType == 6) && ((r[xreg::PA_SU_SC_MODE_CNTL] >> 21) & 1);
     const uint32_t reset = draw.index32 ? r[xreg::VGT_MULTI_PRIM_IB_RESET_INDX] : (r[xreg::VGT_MULTI_PRIM_IB_RESET_INDX] & 0xFFFF);
@@ -454,7 +454,7 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
         {
             if (idx[i] < 0 || idx[i + 1] < 0 || idx[i + 2] < 0)
             {
-                k = 0;   // reinicia a tira (a paridade conta a partir do novo comeco)
+                k = 0;   // restart the strip (parity counts from the new start)
                 continue;
             }
             if (k++ & 1)
@@ -476,7 +476,7 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
     const uint32_t count = uint32_t(hi - lo + 1);
     for (int64_t v : tri)
         m.tris.push_back(uint32_t(std::max<int64_t>(v, lo) - lo));
-    // atributos
+    // attributes
     struct Attr { const ShaderVertexInput* in; std::vector<float>* out; int comps; };
     const Attr attrs[] = { { pos, &m.pos, 3 }, { FindInput(vs, "NORMAL", 0), &m.nrm, 3 }, { FindInput(vs, "TEXCOORD", 0), &m.uv, 2 },
                            { FindInput(vs, "COLOR", 0), &m.col, 4 } };
@@ -516,8 +516,8 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
         return;
     {
         char line[256];
-        snprintf(line, sizeof(line), "# draw: primitiva %u, %u indices (%s, %u bits), base %d, vertices %lld..%lld (%u)\n", draw.primType,
-                 draw.numIndices, draw.indexed ? "indexado" : "sem indices", draw.index32 ? 32 : 16, baseVertex, (long long)lo,
+        snprintf(line, sizeof(line), "# draw: primitive %u, %u indices (%s, %u bits), base %d, vertices %lld..%lld (%u)\n", draw.primType,
+                 draw.numIndices, draw.indexed ? "indexed" : "no indices", draw.index32 ? 32 : 16, baseVertex, (long long)lo,
                  (long long)hi, count);
         m.info += line;
         for (const auto& in : vs->inputs)
@@ -527,13 +527,13 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
             std::string st;
             uint64_t off = 0;
             Resolve(a, st, off);
-            snprintf(line, sizeof(line), "# vfetch %s%u: formato %u, offset %u, stride %u, slot %u (stream %llX, %u bytes), sinal %d, inteiro %d, exp %d\n",
+            snprintf(line, sizeof(line), "# vfetch %s%u: format %u, offset %u, stride %u, slot %u (stream %llX, %u bytes), signed %d, integer %d, exp %d\n",
                      in.semantic, in.semanticIndex, in.format, in.offsetBytes, in.strideBytes, in.fetchSlot, (unsigned long long)off, size,
                      in.isSigned, in.isInteger, in.expAdjust);
             m.info += line;
         }
     }
-    // textura do sampler 0 do pixel shader (ou o primeiro usado)
+    // texture of the pixel shader's sampler 0 (or the first one used)
     for (uint32_t slot = 0; ps && slot < 16; slot++)
         if (ps->samplerMask & (1u << slot))
         {
@@ -556,7 +556,7 @@ void ModelCaptureDraw(const DrawCall& draw, const GuestShader* vs, const GuestSh
 void ModelCaptureFinish()
 {
     if (g_active.exchange(false))
-        fprintf(stderr, "[modelos] jogo fechando: %zu malhas salvas\n", Save(TakeMeshes()));
+        fprintf(stderr, "[models] game closing: %zu meshes saved\n", Save(TakeMeshes()));
 }
 
 std::wstring ModelCaptureToggle()
@@ -567,19 +567,19 @@ std::wstring ModelCaptureToggle()
             std::lock_guard<std::mutex> lock(g_meshMutex);
             g_seen.clear();
         }
-        fprintf(stderr, "[modelos] captura ligada: ande pela cena; F11 de novo salva\n");
-        return L"CAPTURA DE MODELOS ligada (F11 de novo salva)";
+        fprintf(stderr, "[models] capture on: walk around the scene; F11 again saves\n");
+        return L"MODEL CAPTURE on (F11 again saves)";
     }
     g_active = false;
-    // grava numa thread propria (milhares de .obj em texto: o jogo nao para)
+    // write on a separate thread (thousands of text .obj files: the game does not stall)
     auto meshes = std::make_shared<std::vector<Mesh>>(TakeMeshes());
     const size_t n = meshes->size();
     std::thread([meshes] {
-        SetThreadDescription(GetCurrentThread(), L"salvar modelos");
+        SetThreadDescription(GetCurrentThread(), L"save models");
         Save(*meshes);
-        fprintf(stderr, "[modelos] captura salva: %zu malhas novas\n", meshes->size());
+        fprintf(stderr, "[models] capture saved: %zu new meshes\n", meshes->size());
     }).detach();
     wchar_t t[128];
-    swprintf(t, 128, L"MODELOS: salvando %zu malhas (pasta _modelos da cena)", n);
+    swprintf(t, 128, L"MODELS: saving %zu meshes (the scene's _models folder)", n);
     return t;
 }

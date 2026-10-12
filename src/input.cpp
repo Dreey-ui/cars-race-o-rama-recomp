@@ -1,6 +1,6 @@
-// Entrada do host: controle XInput (controle de Xbox no PC) + teclado quando a janela do jogo tem foco.
-// Teclado: Enter = Start, Tab = Back, Espaco = A, Esc/Backspace/X = B, C = X, V = Y, Q/E = LB/RB,
-//          setas = direcional + analogico esquerdo, W = acelerar (RT), S = freio/re (LT), I/J/K/L = analogico direito.
+// Host input: XInput controller (Xbox controller on PC) + keyboard when the game window has focus.
+// Keyboard: Enter = Start, Tab = Back, Space = A, Esc/Backspace/X = B, C = X, V = Y, Q/E = LB/RB,
+//          arrows = d-pad + left stick, W = accelerate (RT), S = brake/reverse (LT), I/J/K/L = right stick.
 #include "input.h"
 
 #include <windows.h>
@@ -46,13 +46,13 @@ static bool OurWindowHasFocus()
 
 static bool Key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-// Log de sessao: botoes que mudaram desde a ultima leitura do jogo ("[input] controle 0: +A -START"); gatilhos e analogicos
-// contam como apertados passando da metade
+// Session log: buttons that changed since the game's last read ("[input] pad 0: +A -START"); triggers and sticks
+// count as pressed past the halfway point
 static void LogInputChanges(uint32_t user, bool connected, const HostPadState& s)
 {
-    static const char* const kNames[] = { "CIMA", "BAIXO", "ESQ", "DIR", "START", "BACK", "L3", "R3", "LB", "RB", "?10", "?11",
-                                          "A", "B", "X", "Y", "LT", "RT", "LS_ESQ", "LS_DIR", "LS_CIMA", "LS_BAIXO",
-                                          "RS_ESQ", "RS_DIR", "RS_CIMA", "RS_BAIXO" };
+    static const char* const kNames[] = { "UP", "DOWN", "LEFT", "RIGHT", "START", "BACK", "L3", "R3", "LB", "RB", "?10", "?11",
+                                          "A", "B", "X", "Y", "LT", "RT", "LS_LEFT", "LS_RIGHT", "LS_UP", "LS_DOWN",
+                                          "RS_LEFT", "RS_RIGHT", "RS_UP", "RS_DOWN" };
     static std::mutex mutex;
     static uint32_t lastBits[4];
     static bool lastConnected[4];
@@ -66,8 +66,8 @@ static void LogInputChanges(uint32_t user, bool connected, const HostPadState& s
     std::lock_guard<std::mutex> lock(mutex);
     if (connected != lastConnected[user])
     {
-        if (user != 0)   // o 0 sempre existe (teclado)
-            fprintf(stderr, "[input] controle %u %s\n", user, connected ? "conectado" : "desconectado");
+        if (user != 0)   // pad 0 always exists (keyboard)
+            fprintf(stderr, "[input] pad %u %s\n", user, connected ? "connected" : "disconnected");
         lastConnected[user] = connected;
     }
     const uint32_t changed = bits ^ lastBits[user];
@@ -80,7 +80,7 @@ static void LogInputChanges(uint32_t user, bool connected, const HostPadState& s
             text += (bits & (1u << i)) ? " +" : " -";
             text += kNames[i];
         }
-    fprintf(stderr, "[input] controle %u:%s\n", user, text.c_str());
+    fprintf(stderr, "[input] pad %u:%s\n", user, text.c_str());
     lastBits[user] = bits;
 }
 
@@ -104,7 +104,7 @@ bool HostInputGetState(uint32_t user, HostPadState& out)
             out.thumbRY = s.Gamepad.sThumbRY;
         }
     }
-    // O teclado sempre conta como o controle 0
+    // The keyboard always counts as pad 0
     if (user == 0)
     {
         connected = true;

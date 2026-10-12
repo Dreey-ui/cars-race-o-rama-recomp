@@ -1,4 +1,4 @@
-# Converte frame_*.bmp em .png (reduzido pela metade) para visualizacao
+# Converts frame_*.bmp to .png (half size) for viewing
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path $PSScriptRoot
 Get-ChildItem -Path $root -Filter "frame_*.bmp" | ForEach-Object {

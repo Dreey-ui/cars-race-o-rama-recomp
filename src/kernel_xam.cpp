@@ -1,10 +1,10 @@
-// XAM: perfil local sempre logado, saves (XamContent*) na pasta "savegame" do jogo, enumeradores, notificacoes do
-// sistema e telas do sistema (login, escolha de dispositivo, mensagens) respondidas na hora. Semantica do Xenia
-// (xam_user.cc, xam_content.cc, xam_ui.cc, xam_enum.cc, xam_notify.cc em C:\DEB\ref\xenia).
-//   <jogo>\savegame\perfil.ini         [Perfil] Nome= (gamertag; padrao = usuario do Windows)
-//   <jogo>\savegame\<arquivo>\         cada "conteudo" (save) do jogo; o jogo abre como <raiz>:\... (Cars:\PSLOT0.dat)
-//   <jogo>\savegame\<arquivo>.info      tipo e nome mostrado do save (para a lista de saves)
-// CARS_SAVES=<pasta> troca a pasta (testes).
+// XAM: local profile always signed in, saves (XamContent*) in the game's "savegame" folder, enumerators, system
+// notifications and system UI (sign-in, device selector, message boxes) answered right away. Xenia semantics
+// (xam_user.cc, xam_content.cc, xam_ui.cc, xam_enum.cc, xam_notify.cc in C:\DEB\ref\xenia).
+//   <game>\savegame\profile.ini        [Profile] Name= (gamertag; default = Windows user name)
+//   <game>\savegame\<file>\            each game "content" (save); the game opens it as <root>:\... (Cars:\PSLOT0.dat)
+//   <game>\savegame\<file>.info        type and display name of the save (for the save list)
+// CARS_SAVES=<folder> changes the folder (tests).
 #include "kernel.h"
 
 #include <windows.h>
@@ -84,7 +84,7 @@ std::u16string Utf16(const std::string& s)
     return out;
 }
 
-// ---- Pasta dos saves e perfil ----
+// ---- Saves and profile folder ----
 const fs::path& SaveRoot()
 {
     static const fs::path root = [] {
@@ -99,32 +99,32 @@ const fs::path& SaveRoot()
 const std::string& ProfileName()
 {
     static const std::string name = [] {
-        const std::wstring ini = (SaveRoot() / L"perfil.ini").wstring();
+        const std::wstring ini = (SaveRoot() / L"profile.ini").wstring();
         wchar_t buf[64] = {};
-        GetPrivateProfileStringW(L"Perfil", L"Nome", L"", buf, 64, ini.c_str());
+        GetPrivateProfileStringW(L"Profile", L"Name", L"", buf, 64, ini.c_str());
         std::wstring w = buf;
         if (w.empty())
         {
             DWORD n = 64;
             if (!GetUserNameW(buf, &n))
-                wcscpy_s(buf, L"Jogador");
+                wcscpy_s(buf, L"Player");
             w = buf;
-            WritePrivateProfileStringW(L"Perfil", L"Nome", w.c_str(), ini.c_str());
+            WritePrivateProfileStringW(L"Profile", L"Name", w.c_str(), ini.c_str());
         }
-        // gamertag: ate 15 caracteres ASCII
+        // gamertag: up to 15 ASCII characters
         std::string s;
         for (wchar_t c : w)
             if (s.size() < 15)
                 s += (c >= 32 && c < 127) ? char(c) : '_';
         if (s.empty())
-            s = "Jogador";
-        fprintf(stderr, "[perfil] logado localmente como \"%s\"; saves em %s\n", s.c_str(), SaveRoot().string().c_str());
+            s = "Player";
+        fprintf(stderr, "[profile] signed in locally as \"%s\"; saves in %s\n", s.c_str(), SaveRoot().string().c_str());
         return s;
     }();
     return name;
 }
 
-// ---- XOVERLAPPED {+0 resultado, +4 tamanho, +8 contexto, +0xC evento, +0x10 rotina, +0x14 contexto da rotina, +0x18 erro} ----
+// ---- XOVERLAPPED {+0 result, +4 length, +8 context, +0xC event, +0x10 routine, +0x14 routine context, +0x18 error} ----
 void SetEvent_(uint32_t handle, bool signaled)
 {
     if (!handle)
@@ -148,8 +148,8 @@ void CompleteOverlapped(uint32_t ov, uint32_t result, uint32_t extended, uint32_
         KQueueApc(routine, result, length, ov);
 }
 
-// Termina uma operacao que pode ter XOVERLAPPED: com ele, completa (resultado 0 ou "falhou" + erro estendido) e devolve
-// ERROR_IO_PENDING como o XAM; sem ele, devolve o resultado direto
+// Finishes an operation that may have an XOVERLAPPED: with one, completes it (result 0 or "failed" + extended error) and
+// returns ERROR_IO_PENDING like XAM does; without one, returns the result directly
 uint32_t Finish(uint32_t ov, uint32_t result, uint32_t length = 0)
 {
     if (!ov)
@@ -158,7 +158,7 @@ uint32_t Finish(uint32_t ov, uint32_t result, uint32_t length = 0)
     return kIoPending;
 }
 
-// ---- Notificacoes (XamNotifyCreateListener / XNotifyGetNext) ----
+// ---- Notifications (XamNotifyCreateListener / XNotifyGetNext) ----
 struct Listener
 {
     uint64_t mask = 0;
@@ -185,14 +185,14 @@ void Broadcast(uint32_t id, uint32_t param)
         EnqueueLocked(h, l, id, param);
 }
 
-// Tela do sistema "aberta e fechada" na hora (o jogo espera o XN_SYS_UI voltar a 0 para continuar)
+// System UI "opened and closed" right away (the game waits for XN_SYS_UI to go back to 0 before continuing)
 void SystemUiFlash()
 {
     Broadcast(kXnSysUi, 1);
     Broadcast(kXnSysUi, 0);
 }
 
-// ---- Enumeradores (XamEnumerate) ----
+// ---- Enumerators (XamEnumerate) ----
 struct Enumerator
 {
     uint32_t itemSize = 0, perCall = 1;
@@ -212,9 +212,9 @@ uint32_t NewEnumerator(std::shared_ptr<Enumerator> e)
     return h;
 }
 
-// ---- Saves (XCONTENT_DATA {+0 dispositivo, +4 tipo, +8 nome mostrado u16[128], +0x108 nome do arquivo char[42]}) ----
+// ---- Saves (XCONTENT_DATA {+0 device, +4 type, +8 display name u16[128], +0x108 file name char[42]}) ----
 std::mutex g_contentMutex;
-std::map<std::string, fs::path> g_roots;   // "save" -> pasta do save montado
+std::map<std::string, fs::path> g_roots;   // "save" -> folder of the mounted save
 
 struct ContentData
 {
@@ -268,7 +268,7 @@ void WriteInfo(const fs::path& dir, const ContentData& c)
     info += L".info";
     if (FILE* f = _wfopen(info.c_str(), L"wb"))
     {
-        fprintf(f, "tipo=%u\nnome=%s\narquivo=%s\n", c.type, Utf8(c.display).c_str(), c.file.c_str());
+        fprintf(f, "type=%u\nname=%s\nfile=%s\n", c.type, Utf8(c.display).c_str(), c.file.c_str());
         fclose(f);
     }
 }
@@ -295,12 +295,12 @@ std::vector<ContentData> ListContent(uint32_t type)
                 std::string l = line;
                 while (!l.empty() && (l.back() == '\n' || l.back() == '\r'))
                     l.pop_back();
-                if (l.compare(0, 5, "tipo=") == 0)
+                if (l.compare(0, 5, "type=") == 0 || l.compare(0, 5, "tipo=") == 0)   // tipo/nome/arquivo: older files
                     c.type = uint32_t(strtoul(l.c_str() + 5, nullptr, 10));
-                else if (l.compare(0, 5, "nome=") == 0)
+                else if (l.compare(0, 5, "name=") == 0 || l.compare(0, 5, "nome=") == 0)
                     c.display = Utf16(l.substr(5));
-                else if (l.compare(0, 8, "arquivo=") == 0)
-                    c.file = l.substr(8);
+                else if (l.compare(0, 5, "file=") == 0 || l.compare(0, 8, "arquivo=") == 0)
+                    c.file = l.substr(l[0] == 'f' ? 5 : 8);
             }
             fclose(f);
         }
@@ -325,7 +325,7 @@ void LogSave(const char* fmt, ...)
     va_end(a);
 }
 
-// ---- Configuracoes do perfil (XUSER_PROFILE_SETTING: +0 origem, +8 usuario/xuid, +0x10 id, +0x18 XUSER_DATA {tipo, +8 valor}) ----
+// ---- Profile settings (XUSER_PROFILE_SETTING: +0 source, +8 user/xuid, +0x10 id, +0x18 XUSER_DATA {type, +8 value}) ----
 struct DefaultSetting
 {
     uint32_t id;
@@ -333,20 +333,20 @@ struct DefaultSetting
 };
 const DefaultSetting kDefaults[] = {
     { 0x10040002, 0 },   // XPROFILE_GAMER_YAXIS_INVERSION
-    { 0x10040003, 3 },   // XPROFILE_OPTION_CONTROLLER_VIBRATION (ligada)
+    { 0x10040003, 3 },   // XPROFILE_OPTION_CONTROLLER_VIBRATION (on)
     { 0x10040015, 0 },   // XPROFILE_GAMER_DIFFICULTY (normal)
     { 0x10040018, 0 },   // XPROFILE_GAMER_CONTROL_SENSITIVITY
     { 0x10040021, 1 },   // XPROFILE_GAMER_ACTION_AUTO_AIM
     { 0x10040022, 1 },   // XPROFILE_GAMER_ACTION_AUTO_CENTER
     { 0x10040023, 0 },   // XPROFILE_GAMER_ACTION_MOVEMENT_CONTROL
-    { 0x10040024, 1 },   // XPROFILE_GAMER_RACE_TRANSMISSION (automatica)
+    { 0x10040024, 1 },   // XPROFILE_GAMER_RACE_TRANSMISSION (automatic)
     { 0x10040025, 0 },   // XPROFILE_GAMER_RACE_CAMERA_LOCATION
     { 0x10040026, 0 },   // XPROFILE_GAMER_RACE_BRAKE_CONTROL
     { 0x10040027, 0 },   // XPROFILE_GAMER_RACE_ACCELERATOR_CONTROL
 };
 }  // namespace
 
-// Caminho "<raiz>:\..." de um save montado (XamContentCreateEx) -> pasta no PC. Chamado por ResolvePath (kernel_io.cpp).
+// "<root>:\..." path of a mounted save (XamContentCreateEx) -> folder on the PC. Called by ResolvePath (kernel_io.cpp).
 bool XamResolveContentPath(const std::string& xboxPath, fs::path& out)
 {
     std::string p = xboxPath;
@@ -372,17 +372,17 @@ bool XamResolveContentPath(const std::string& xboxPath, fs::path& out)
     return true;
 }
 
-// ---- Usuario ----
+// ---- User ----
 KERNEL_IMPORT(XamUserGetSigninState)
 {
-    // 1 = logado localmente (sem Live) - so o controle 1
+    // 1 = signed in locally (no Live) - only controller 1
     ctx.r3.u64 = ctx.r3.u32 == 0 ? 1 : 0;
     (void)ProfileName();
 }
 
 KERNEL_IMPORT(XamUserGetName)
 {
-    // (usuario, buffer, tamanho com o zero)
+    // (user, buffer, size including the terminator)
     const uint32_t user = ctx.r3.u32, buf = ctx.r4.u32, len = ctx.r5.u32;
     if (user != 0)
     {
@@ -402,7 +402,7 @@ KERNEL_IMPORT(XamUserGetName)
 
 KERNEL_IMPORT(XamUserReadProfileSettings)
 {
-    // (titulo, usuario, n xuids, xuids*, n configuracoes, ids*, tamanho do buffer*, buffer, [pilha] overlapped)
+    // (title, user, xuid count, xuids*, setting count, ids*, buffer size*, buffer, [stack] overlapped)
     const uint32_t user = ctx.r4.u32, xuidCount = ctx.r5.u32, xuids = ctx.r6.u32, count = ctx.r7.u32, ids = ctx.r8.u32;
     const uint32_t sizePtr = ctx.r9.u32, buffer = ctx.r10.u32, ov = R32(ctx.r1.u32 + 0x54);
     if (count < 1 || count > 32 || !sizePtr || !ids)
@@ -415,7 +415,7 @@ KERNEL_IMPORT(XamUserReadProfileSettings)
     for (uint32_t i = 0; i < count; i++)
     {
         const uint32_t id = R32(ids + 4 * i), type = id >> 28, size = (id >> 16) & 0xFFF;
-        if (type == 4 || type == 6)   // texto / binario: dados depois dos cabecalhos
+        if (type == 4 || type == 6)   // string / binary: data after the headers
             extra += size;
     }
     const uint32_t need = 8 + users * (count * 40 + extra);
@@ -437,7 +437,7 @@ KERNEL_IMPORT(XamUserReadProfileSettings)
             snprintf(b, sizeof(b), " %08X", R32(ids + 4 * i));
             list += b;
         }
-        fprintf(stderr, "[perfil] jogo leu %u configuracao(oes) do perfil:%s\n", count, list.c_str());
+        fprintf(stderr, "[profile] game read %u profile setting(s):%s\n", count, list.c_str());
     }
     if (user != 0 && !xuids)
     {
@@ -452,12 +452,12 @@ KERNEL_IMPORT(XamUserReadProfileSettings)
         const uint32_t s = buffer + 8 + i * 40, id = R32(ids + 4 * i), type = id >> 28, size = (id >> 16) & 0xFFF;
         for (uint32_t k = 0; k < 40; k += 4)
             W32(s + k, 0);
-        uint32_t source = 0;   // sem valor
+        uint32_t source = 0;   // no value
         uint32_t value = 0;
         for (const auto& d : kDefaults)
             if (d.id == id)
             {
-                source = 1;   // padrao do sistema
+                source = 1;   // system default
                 value = d.value;
             }
         W32(s + 0x00, source);
@@ -469,7 +469,7 @@ KERNEL_IMPORT(XamUserReadProfileSettings)
         W8(s + 0x18, uint8_t(type));
         if (type == 4 || type == 6)
         {
-            W32(s + 0x20, 0);   // vazio
+            W32(s + 0x20, 0);   // empty
             W32(s + 0x24, data);
             data += size;
         }
@@ -481,7 +481,7 @@ KERNEL_IMPORT(XamUserReadProfileSettings)
 
 KERNEL_IMPORT(XamUserCreateAchievementEnumerator)
 {
-    // (titulo, usuario, xuid, flags, inicio, quantidade, tamanho do buffer*, handle*): sem conquistas
+    // (title, user, xuid, flags, start, count, buffer size*, handle*): no achievements
     const uint32_t flags = ctx.r6.u32, count = ctx.r8.u32, sizePtr = ctx.r9.u32, handlePtr = ctx.r10.u32;
     if (!count || !sizePtr || !handlePtr)
     {
@@ -496,10 +496,10 @@ KERNEL_IMPORT(XamUserCreateAchievementEnumerator)
     ctx.r3.u64 = kOk;
 }
 
-// ---- Telas do sistema ----
+// ---- System UI ----
 KERNEL_IMPORT(XamShowSigninUI)
 {
-    // (usuarios necessarios, flags): o perfil local ja esta logado
+    // (users needed, flags): the local profile is already signed in
     SystemUiFlash();
     Broadcast(kXnSysSigninChanged, 1);
     ctx.r3.u64 = kOk;
@@ -507,7 +507,7 @@ KERNEL_IMPORT(XamShowSigninUI)
 
 KERNEL_IMPORT(XamShowDeviceSelectorUI)
 {
-    // (usuario, tipo de conteudo, flags, bytes pedidos, id do dispositivo*, overlapped): sempre o "disco rigido"
+    // (user, content type, flags, bytes requested, device id*, overlapped): always the "hard drive"
     const uint32_t devPtr = ctx.r7.u32, ov = ctx.r8.u32;
     if (!devPtr || !ov)
     {
@@ -515,34 +515,34 @@ KERNEL_IMPORT(XamShowDeviceSelectorUI)
         return;
     }
     W32(devPtr, kDeviceHdd);
-    LogSave("escolha de dispositivo: disco rigido (%s)", SaveRoot().string().c_str());
+    LogSave("device selector: hard drive (%s)", SaveRoot().string().c_str());
     SystemUiFlash();
     ctx.r3.u64 = Finish(ov, kOk);
 }
 
 KERNEL_IMPORT(XamShowMessageBoxUIEx)
 {
-    // (usuario, titulo, texto, n botoes, botoes*, botao ativo, flags, ?, [pilha] resultado*, overlapped): escolhe o botao ativo
+    // (user, title, text, button count, buttons*, active button, flags, ?, [stack] result*, overlapped): picks the active button
     const std::string title = Utf8(GuestWString(ctx.r4.u32)), text = Utf8(GuestWString(ctx.r5.u32));
     const uint32_t active = ctx.r8.u32, resultPtr = R32(ctx.r1.u32 + 0x54), ov = R32(ctx.r1.u32 + 0x58);
-    fprintf(stderr, "[xam] mensagem do sistema \"%s\": %s (respondido: botao %u)\n", title.c_str(), text.c_str(), active);
+    fprintf(stderr, "[xam] system message \"%s\": %s (answered: button %u)\n", title.c_str(), text.c_str(), active);
     if (resultPtr)
         W32(resultPtr, active);
     SystemUiFlash();
     ctx.r3.u64 = Finish(ov, kOk);
 }
 
-// ---- Dispositivos e saves ----
+// ---- Devices and saves ----
 KERNEL_IMPORT(XamContentGetDeviceState)
 {
-    // (dispositivo, overlapped)
+    // (device, overlapped)
     const uint32_t r = ctx.r3.u32 == kDeviceHdd ? kOk : kDeviceNotConnected;
     ctx.r3.u64 = Finish(ctx.r4.u32, r);
 }
 
 KERNEL_IMPORT(XamContentGetDeviceData)
 {
-    // (dispositivo, X_CONTENT_DEVICE_DATA* {id, tipo, total u64, livre u64, nome u16[28]})
+    // (device, X_CONTENT_DEVICE_DATA* {id, type, total u64, free u64, name u16[28]})
     const uint32_t p = ctx.r4.u32;
     if (ctx.r3.u32 != kDeviceHdd || !p)
     {
@@ -558,7 +558,7 @@ KERNEL_IMPORT(XamContentGetDeviceData)
         freeBytes.QuadPart = 8ull << 30;
     }
     W32(p + 0, kDeviceHdd);
-    W32(p + 4, 1);   // disco rigido
+    W32(p + 4, 1);   // hard drive
     W64(p + 8, total.QuadPart);
     W64(p + 16, freeBytes.QuadPart);
     const char16_t name[] = u"Hard Drive";
@@ -569,7 +569,7 @@ KERNEL_IMPORT(XamContentGetDeviceData)
 
 KERNEL_IMPORT(XamContentCreateEnumerator)
 {
-    // (usuario, dispositivo, tipo, flags, itens por chamada, tamanho do buffer*, handle*)
+    // (user, device, type, flags, items per call, buffer size*, handle*)
     const uint32_t device = ctx.r4.u32, type = ctx.r5.u32, perCall = ctx.r7.u32, sizePtr = ctx.r8.u32, handlePtr = ctx.r9.u32;
     if (!handlePtr || (device && device != kDeviceHdd))
     {
@@ -597,7 +597,7 @@ KERNEL_IMPORT(XamContentCreateEnumerator)
             item[0x108 + i] = uint8_t(c.file[i]);
         e->items.push_back(std::move(item));
     }
-    LogSave("lista de saves (tipo %u): %zu encontrado(s)", type, e->items.size());
+    LogSave("save list (type %u): %zu found", type, e->items.size());
     if (sizePtr)
         W32(sizePtr, kContentDataSize * e->perCall);
     W32(handlePtr, NewEnumerator(e));
@@ -606,7 +606,7 @@ KERNEL_IMPORT(XamContentCreateEnumerator)
 
 KERNEL_IMPORT(XamEnumerate)
 {
-    // (handle, flags, buffer, tamanho, itens devolvidos*, overlapped)
+    // (handle, flags, buffer, size, items returned*, overlapped)
     const uint32_t handle = ctx.r3.u32, buffer = ctx.r5.u32, length = ctx.r6.u32, itemsPtr = ctx.r7.u32, ov = ctx.r8.u32;
     std::shared_ptr<Enumerator> e;
     {
@@ -649,7 +649,7 @@ KERNEL_IMPORT(XamEnumerate)
 
 KERNEL_IMPORT(XamContentCreateEx)
 {
-    // (usuario, nome da raiz, XCONTENT_DATA*, flags, disposicao*, licenca*, cache, tamanho, [pilha] overlapped)
+    // (user, root name, XCONTENT_DATA*, flags, disposition*, license*, cache, size, [stack] overlapped)
     const std::string root = GuestCString(ctx.r4.u32, 64);
     const ContentData c = ReadContentData(ctx.r5.u32);
     const uint32_t flags = ctx.r6.u32, dispPtr = ctx.r7.u32, licensePtr = ctx.r8.u32, ov = R32(ctx.r1.u32 + 0x54);
@@ -665,17 +665,17 @@ KERNEL_IMPORT(XamContentCreateEx)
         ch = char(tolower((unsigned char)ch));
     const fs::path dir = ContentDir(c.file);
     std::error_code ec;
-    uint32_t result = kOk, disposition = 0;   // 1 criado, 2 aberto
+    uint32_t result = kOk, disposition = 0;   // 1 created, 2 opened
     {
         std::lock_guard<std::mutex> lock(g_contentMutex);
         const bool exists = fs::is_directory(dir, ec);
         switch (flags & 0xF)
         {
-        case 1: if (exists) result = kAlreadyExists; else disposition = 1; break;                 // criar novo
-        case 2: if (exists) fs::remove_all(dir, ec); disposition = 1; break;                       // criar sempre
-        case 3: if (!exists) result = kPathNotFound; else disposition = 2; break;                  // abrir existente
-        case 4: disposition = exists ? 2 : 1; break;                                               // abrir sempre
-        case 5: if (!exists) result = kPathNotFound; else { fs::remove_all(dir, ec); disposition = 1; } break;   // truncar
+        case 1: if (exists) result = kAlreadyExists; else disposition = 1; break;                 // create new
+        case 2: if (exists) fs::remove_all(dir, ec); disposition = 1; break;                       // create always
+        case 3: if (!exists) result = kPathNotFound; else disposition = 2; break;                  // open existing
+        case 4: disposition = exists ? 2 : 1; break;                                               // open always
+        case 5: if (!exists) result = kPathNotFound; else { fs::remove_all(dir, ec); disposition = 1; } break;   // truncate
         default: result = kInvalidParameter; break;
         }
         if (!result && disposition == 1)
@@ -688,8 +688,8 @@ KERNEL_IMPORT(XamContentCreateEx)
         if (!result)
             g_roots[key] = dir;
     }
-    LogSave("XamContentCreateEx \"%s\" (tipo %u, \"%s\") como %s: -> %s (%s)", c.file.c_str(), c.type, Utf8(c.display).c_str(),
-            root.c_str(), dir.string().c_str(), result ? "falhou" : disposition == 1 ? "criado" : "aberto");
+    LogSave("XamContentCreateEx \"%s\" (type %u, \"%s\") as %s: -> %s (%s)", c.file.c_str(), c.type, Utf8(c.display).c_str(),
+            root.c_str(), dir.string().c_str(), result ? "failed" : disposition == 1 ? "created" : "opened");
     if (dispPtr && !result)
         W32(dispPtr, disposition);
     if (licensePtr && !result)
@@ -705,7 +705,7 @@ KERNEL_IMPORT(XamContentCreateEx)
 
 KERNEL_IMPORT(XamContentClose)
 {
-    // (nome da raiz, overlapped)
+    // (root name, overlapped)
     std::string key = GuestCString(ctx.r3.u32, 64);
     if (!key.empty() && key.back() == ':')
         key.pop_back();
@@ -728,7 +728,7 @@ KERNEL_IMPORT(XamContentClose)
 
 KERNEL_IMPORT(XamContentDelete)
 {
-    // (usuario, XCONTENT_DATA*, overlapped)
+    // (user, XCONTENT_DATA*, overlapped)
     const ContentData c = ReadContentData(ctx.r4.u32);
     const fs::path dir = ContentDir(c.file);
     std::error_code ec;
@@ -745,13 +745,13 @@ KERNEL_IMPORT(XamContentDelete)
             fs::remove(info, ec);
         }
     }
-    LogSave("XamContentDelete \"%s\": %s", c.file.c_str(), result ? "nao existe" : "apagado");
+    LogSave("XamContentDelete \"%s\": %s", c.file.c_str(), result ? "does not exist" : "deleted");
     ctx.r3.u64 = Finish(ctx.r5.u32, result);
 }
 
 KERNEL_IMPORT(XamContentGetCreator)
 {
-    // (usuario, XCONTENT_DATA*, e o criador*, xuid do criador*, overlapped)
+    // (user, XCONTENT_DATA*, is creator*, creator xuid*, overlapped)
     const ContentData c = ReadContentData(ctx.r4.u32);
     const uint32_t isCreator = ctx.r5.u32, xuidPtr = ctx.r6.u32, ov = ctx.r7.u32;
     if (!isCreator)
@@ -772,10 +772,10 @@ KERNEL_IMPORT(XamContentGetCreator)
     ctx.r3.u64 = Finish(ov, result);
 }
 
-// ---- Notificacoes ----
+// ---- Notifications ----
 KERNEL_IMPORT(XamNotifyCreateListener)
 {
-    // (mascara u64, versao maxima)
+    // (u64 mask, max version)
     auto obj = std::make_shared<KObject>();
     obj->type = KType::Event;
     obj->manualReset = true;
@@ -783,7 +783,7 @@ KERNEL_IMPORT(XamNotifyCreateListener)
     std::lock_guard<std::mutex> lock(g_notifyMutex);
     Listener& l = g_listeners[h];
     l.mask = ctx.r3.u64;
-    // o que o XAM manda na partida (como o Xenia): tela do sistema fechada, perfil logado, Live desconectado
+    // what XAM sends at startup (like Xenia): system UI closed, profile signed in, Live disconnected
     if (!g_startupNotified && (l.mask & 1))
     {
         g_startupNotified = true;
@@ -801,7 +801,7 @@ KERNEL_IMPORT(XamNotifyCreateListener)
 
 KERNEL_IMPORT(XNotifyGetNext)
 {
-    // (handle, id procurado (0 = qualquer), id*, parametro*)
+    // (handle, wanted id (0 = any), id*, parameter*)
     const uint32_t handle = ctx.r3.u32, match = ctx.r4.u32, idPtr = ctx.r5.u32, paramPtr = ctx.r6.u32;
     if (paramPtr)
         W32(paramPtr, 0);
@@ -835,14 +835,14 @@ KERNEL_IMPORT(XNotifyGetNext)
     ctx.r3.u64 = got ? 1 : 0;
 }
 
-// ---- XMsg assincrono (apps do sistema: conquistas, sessoes, player de musica) ----
+// ---- Asynchronous XMsg (system apps: achievements, sessions, music player) ----
 static void XMsgAsync(PPCContext& ctx, const char* name)
 {
-    // (app, mensagem, overlapped, buffer, tamanho[, args]): aceito e completado na hora
+    // (app, message, overlapped, buffer, size[, args]): accepted and completed right away
     const uint32_t app = ctx.r3.u32, msg = ctx.r4.u32, ov = ctx.r5.u32;
     static std::atomic<int> logged{ 0 };
     if (logged++ < 12)
-        fprintf(stderr, "[xmsg] %s app=%X msg=%08X buf=%08X tam=%X (completado sem efeito)\n", name, app, msg, ctx.r6.u32, ctx.r7.u32);
+        fprintf(stderr, "[xmsg] %s app=%X msg=%08X buf=%08X size=%X (completed, no effect)\n", name, app, msg, ctx.r6.u32, ctx.r7.u32);
     if (ov)
     {
         CompleteOverlapped(ov, kOk, kOk, 0);

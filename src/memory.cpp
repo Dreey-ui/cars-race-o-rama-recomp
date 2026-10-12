@@ -25,8 +25,8 @@ static constexpr uint32_t kPage = 0x1000;
 static uint32_t AlignUp(uint32_t v, uint32_t a)   { return (v + a - 1) & ~(a - 1); }
 static uint32_t AlignDown(uint32_t v, uint32_t a) { return v & ~(a - 1); }
 
-// Memoria fisica do 360 (512 MB) vista em tres janelas: 0xA0000000 (paginas de 64 KB), 0xC0000000 (16 MB)
-// e 0xE0000000 (4 KB). As tres sao views da mesma secao, como no hardware.
+// Xbox 360 physical memory (512 MB) seen through three windows: 0xA0000000 (64 KB pages), 0xC0000000 (16 MB)
+// and 0xE0000000 (4 KB). All three are views of the same section, as on the hardware.
 static constexpr uint32_t kPhysicalViews[3] = { 0xA0000000u, 0xC0000000u, 0xE0000000u };
 static constexpr uint32_t kPhysicalSize = 0x20000000u;
 
@@ -38,7 +38,7 @@ bool GuestMemory::Init()
         return false;
     for (int attempt = 0; attempt < 16; attempt++)
     {
-        // Acha 4 GB livres, libera e remonta: parte baixa reservada + 3 views da memoria fisica
+        // Find 4 free GB, release and remap: low part reserved + 3 views of physical memory
         uint8_t* p = (uint8_t*)VirtualAlloc(nullptr, kGuestSize, MEM_RESERVE, PAGE_READWRITE);
         if (!p)
             return false;
@@ -82,7 +82,7 @@ bool GuestMemory::Commit(uint32_t addr, uint32_t size)
         end = kGuestSize;
 #ifdef _WIN32
     if (start >= kPhysicalViews[0])
-        return true;   // memoria fisica: ja commitada (secao)
+        return true;   // physical memory: already committed (section)
     if (end > kPhysicalViews[0])
         end = kPhysicalViews[0];
     return VirtualAlloc(base + start, end - start, MEM_COMMIT, PAGE_READWRITE) != nullptr;
@@ -94,8 +94,8 @@ bool GuestMemory::Commit(uint32_t addr, uint32_t size)
 struct GuestHeap::Impl
 {
     std::mutex mutex;
-    std::map<uint32_t, uint32_t> freeList;            // início -> tamanho
-    std::unordered_map<uint32_t, uint32_t> allocs;    // início -> tamanho
+    std::map<uint32_t, uint32_t> freeList;            // start -> size
+    std::unordered_map<uint32_t, uint32_t> allocs;    // start -> size
 };
 
 void GuestHeap::Init(uint32_t lo, uint32_t hi)
@@ -213,7 +213,7 @@ void GuestHeap::Snapshot(std::vector<std::pair<uint32_t, uint32_t>>& out) const
     std::sort(out.begin() + first, out.end());
 }
 
-// Todas as faixas alocadas nos heaps guest (varredura de shaders da GPU)
+// All ranges allocated in the guest heaps (GPU shader scan)
 void GuestAllocatedRanges(std::vector<std::pair<uint32_t, uint32_t>>& out)
 {
     g_virtualHeap.Snapshot(out);

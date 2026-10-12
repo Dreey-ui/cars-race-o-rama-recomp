@@ -1,13 +1,13 @@
 #pragma once
 #include <cstdint>
 
-// Backend grafico D3D12: recebe o estado da GPU Xenos (registradores + pacotes PM4 do processador de comandos)
-// e desenha no host. Os shaders do jogo sao traduzidos pelo XenosRecomp (gpu/shaders.cpp).
+// D3D12 graphics backend: receives the Xenos GPU state (registers + PM4 packets from the command processor)
+// and draws on the host. The game's shaders are translated by XenosRecomp (gpu/shaders.cpp).
 
 bool RendererInit(bool vsync, uint32_t* registers, const uint8_t* image, size_t imageSize);
 bool RendererEnabled();
 
-// Chamadas da thread do processador de comandos (kernel_gpu.cpp)
+// Calls from the command processor thread (kernel_gpu.cpp)
 void RendererSetShader(bool pixel, const uint8_t* microcode, uint32_t sizeDwords);
 
 struct DrawCall
@@ -15,18 +15,18 @@ struct DrawCall
     uint32_t primType;
     uint32_t numIndices;
     bool indexed;
-    uint32_t indexAddress;   // fisico
+    uint32_t indexAddress;   // physical
     bool index32;
     uint32_t indexEndian;
 };
 void RendererDraw(const DrawCall& draw);
 void RendererSwap(uint32_t frontbufferPhys, uint32_t width, uint32_t height);
 
-// O frontbuffer so existe na GPU do host; na memoria guest as paginas dele ficam protegidas depois de cada swap. Quando a
-// CPU do jogo le (ex.: a tela de carregamento copia a tela atual como fundo), o handler de excecao chama isto: copia a imagem
-// da GPU para a memoria guest (BGRA8 linear, como o resolve do Xenos com dest_swap) e libera as paginas.
-// Retorna true se o endereco (guest) era do frontbuffer protegido.
+// The frontbuffer only exists on the host GPU; in guest memory its pages are protected after each swap. When the
+// game's CPU reads it (e.g. the loading screen copies the current screen as its background), the exception handler calls
+// this: copies the image from the GPU to guest memory (linear BGRA8, like the Xenos resolve with dest_swap) and unprotects the pages.
+// Returns true if the (guest) address belonged to the protected frontbuffer.
 bool RendererHandleFrontbufferAccess(uint32_t guestAddr);
 
-// GetTickCount64 do ultimo swap (0 antes do primeiro): o detector de travada do main.cpp avisa quando a imagem para de andar
+// GetTickCount64 of the last swap (0 before the first): main.cpp's hang detector warns when the picture stops moving
 uint64_t RendererLastSwapTick();

@@ -1,4 +1,4 @@
-// Cars Race-O-Rama (Xbox 360) - runtime da recompilação estática
+// Cars Race-O-Rama (Xbox 360) - static recompilation runtime
 #pragma once
 
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include <ppc_context.h>
 
-// Memória guest: um bloco de 4 GB reservado; o endereço guest N fica em base + N
+// Guest memory: one reserved 4 GB block; guest address N lives at base + N
 struct GuestMemory
 {
     uint8_t* base = nullptr;
@@ -29,7 +29,7 @@ inline void W16(uint32_t a, uint16_t v) { *(uint16_t*)(g_mem.base + a) = __built
 inline void W32(uint32_t a, uint32_t v) { *(uint32_t*)(g_mem.base + a) = __builtin_bswap32(v); }
 inline void W64(uint32_t a, uint64_t v) { *(uint64_t*)(g_mem.base + a) = __builtin_bswap64(v); }
 
-// Alocador first-fit sobre uma faixa do espaço guest
+// First-fit allocator over a range of the guest address space
 class GuestHeap
 {
 public:
@@ -38,36 +38,36 @@ public:
     bool AllocFixed(uint32_t addr, uint32_t size);
     bool Free(uint32_t addr, uint32_t* sizeOut = nullptr);
     bool Contains(uint32_t addr) const { return addr >= m_lo && addr < m_hi; }
-    // Faixas alocadas agora (inicio, tamanho), em ordem (a memoria nunca e descommitada: seguro ler depois)
+    // Ranges allocated right now (start, size), in order (memory is never decommitted: safe to read later)
     void Snapshot(std::vector<std::pair<uint32_t, uint32_t>>& out) const;
 private:
     struct Impl;
     uint32_t m_lo = 0, m_hi = 0;
     Impl* m_impl = nullptr;
 };
-extern GuestHeap g_virtualHeap;   // NtAllocateVirtualMemory, pilhas
+extern GuestHeap g_virtualHeap;   // NtAllocateVirtualMemory, stacks
 extern GuestHeap g_physicalHeap;  // MmAllocatePhysicalMemoryEx
-extern GuestHeap g_poolHeap;      // objetos do kernel, ExAllocatePool
+extern GuestHeap g_poolHeap;      // kernel objects, ExAllocatePool
 
 struct GuestThread
 {
     uint32_t pcr = 0;
     uint32_t kthread = 0;
-    uint32_t stackBase = 0;   // endereço mais alto
-    uint32_t stackLimit = 0;  // endereço mais baixo
+    uint32_t stackBase = 0;   // highest address
+    uint32_t stackLimit = 0;  // lowest address
     uint32_t threadId = 0;
     uint32_t tls[64] = {};
-    PPCContext* ctx = nullptr;     // contexto em execucao (diagnostico: amostragem de pilha)
-    uint32_t entry = 0;            // rotina inicial
+    PPCContext* ctx = nullptr;     // running context (diagnostics: stack sampling)
+    uint32_t entry = 0;            // start routine
     struct Apc { uint32_t routine, context, arg1, arg2; };
-    std::vector<Apc> apcs;         // APCs de usuario pendentes (entregues em esperas alertaveis)
+    std::vector<Apc> apcs;         // pending user APCs (delivered in alertable waits)
 };
 GuestThread* CurrentThread();
-// Registro de todas as threads guest (diagnostico)
+// Registry of all guest threads (diagnostics)
 void KRegisterThreadForSampling(GuestThread* gt);
 void KDumpGuestStacks();
 
-// Roda uma função guest na thread host atual, com contexto próprio.
+// Runs a guest function on the current host thread, with its own context.
 void RunGuestMain(PPCFunc* entry, uint32_t stackSize);
 
 inline void CallGuest(PPCContext& ctx, uint8_t* base, uint32_t guestAddress)
@@ -76,7 +76,7 @@ inline void CallGuest(PPCContext& ctx, uint8_t* base, uint32_t guestAddress)
 }
 
 extern bool g_traceImports;
-extern std::string g_gameRoot;   // pasta da ISO extraída
+extern std::string g_gameRoot;   // extracted ISO folder
 
 #define KERNEL_IMPORT(name) PPC_FUNC(__imp__##name)
 

@@ -1,24 +1,24 @@
 #pragma once
 #include <cstdint>
 
-// Vigilancia de escrita da CPU em paginas (4 KB) da memoria fisica guest, para os caches da GPU (vertex/index buffers):
-// uma pagina vigiada fica PAGE_READONLY nas 3 vistas fisicas; a primeira escrita da CPU gera uma excecao que a marca como
-// suja e libera a escrita. Paginas escritas com frequencia viram "dinamicas" por um tempo e nao sao vigiadas (o cache
-// usa o caminho sem cache para elas).
+// CPU write tracking on 4 KB pages of guest physical memory, for the GPU caches (vertex/index buffers):
+// a watched page is PAGE_READONLY in the 3 physical views; the first CPU write raises an exception that marks it
+// dirty and re-enables writes. Pages written often become "dynamic" for a while and are not watched (the cache
+// takes the uncached path for them).
 
-// Todas as paginas da faixa estao vigiadas e sem escrita desde que foram vigiadas?
+// Are all pages in the range watched and unwritten since they started being watched?
 bool MemWatchIsClean(uint32_t phys, uint32_t size);
-// Alguma pagina da faixa e dinamica agora?
+// Is any page in the range dynamic right now?
 bool MemWatchIsDynamic(uint32_t phys, uint32_t size);
-// Passa a vigiar a faixa (depois de copiar os dados). false se alguma pagina e dinamica (nada e vigiado)
+// Start watching the range (after copying the data). false if some page is dynamic (nothing is watched)
 bool MemWatchProtect(uint32_t phys, uint32_t size);
-// Handler de excecao: escrita (guestAddr = endereco guest em qualquer vista) numa pagina vigiada. true = tratado
+// Exception handler: write (guestAddr = guest address in any view) to a watched page. true = handled
 bool MemWatchHandleWriteFault(uint32_t guestAddr);
-// Antes de uma escrita que nao gera excecao (ReadFile do Windows direto na memoria guest): libera e marca suja
+// Before a write that raises no exception (Windows ReadFile straight into guest memory): unprotect and mark dirty
 void MemWatchInvalidate(uint32_t guestAddr, uint32_t size);
-// Muda sempre que alguma pagina vigiada e escrita: um cache que guardou o valor e ve o mesmo ainda esta valido
+// Changes whenever any watched page is written: a cache that stored the value and sees the same one is still valid
 uint32_t MemWatchEpoch();
-// Contador de frames (para a heuristica de paginas dinamicas)
+// Frame counter (for the dynamic-page heuristic)
 void MemWatchSetFrame(uint64_t frame);
-// Estatistica: excecoes de escrita desde a ultima chamada
+// Statistics: write exceptions since the last call
 uint32_t MemWatchTakeFaults();

@@ -1,11 +1,11 @@
 [main]
-# Caminhos relativos a este arquivo (rode o XenonRecomp na pasta C:\DEB\cars)
+# Paths relative to this file (run XenonRecomp in the C:\DEB\cars folder)
 file_path = "default_dec.xex"
 out_directory_path = "ppc"
 switch_table_file_path = "cars_switch_tables.toml"
 
-# Otimizações desligadas no começo (mais lento, mas mais seguro para depurar).
-# Só ligue depois que o jogo estiver rodando.
+# Optimizations off for now (slower, but safer for debugging).
+# Only turn them on once the game is running.
 skip_lr = false
 skip_msr = false
 ctr_as_local = false
@@ -15,8 +15,8 @@ cr_as_local = false
 non_argument_as_local = false
 non_volatile_as_local = false
 
-# Rotinas auxiliares do compilador para salvar/restaurar registradores
-# (o jogo chama as versões _14 até _31 pulando de 4 em 4 bytes dentro delas).
+# Compiler helper routines that save/restore registers
+# (the game calls the _14 to _31 versions by jumping 4 bytes at a time inside them).
 savegprlr_14_address = 0x82506410
 restgprlr_14_address = 0x82506460
 savefpr_14_address = 0x82506EC0
@@ -26,18 +26,18 @@ restvmx_14_address = 0x82507708
 savevmx_64_address = 0x82507504
 restvmx_64_address = 0x8250779C
 
-# setjmp / longjmp da CRT do jogo
+# setjmp / longjmp of the game's CRT
 setjmp_address = 0x825071A0
 longjmp_address = 0x825060F0
 
-# Palavras que são padding/dados dentro da área de código
+# Words that are padding/data inside the code area
 invalid_instructions = [
     { data = 0x00000000, size = 4 },
 ]
 
-# Funções cujo tamanho o analisador calcula errado: ele corta a função no
-# "bctr" do switch, e os blocos dos cases (que ficam logo depois) acabam fora.
-# Tamanhos conferidos contra o .pdata do XEX e os alvos de chamada (bl).
+# Functions whose size the analyzer gets wrong: it cuts the function at the
+# switch "bctr", and the case blocks (right after it) end up outside.
+# Sizes checked against the XEX .pdata and the call targets (bl).
 functions = [
     { address = 0x8212A7E8, size = 0x298 },
     { address = 0x8212AA80, size = 0x158 },
@@ -47,9 +47,9 @@ functions = [
     { address = 0x8226EB78, size = 0xD0 },
     { address = 0x8228AD60, size = 0x1A8 },
     { address = 0x8228AE38, size = 0xD0 },
-    { address = 0x822F8EF8, size = 0x18 },   # stub: 5x mr + "b 0x822F8F10" (sem isso o analisador a funde com a função seguinte)
+    { address = 0x822F8EF8, size = 0x18 },   # stub: 5x mr + "b 0x822F8F10" (without this the analyzer merges it with the next function)
     { address = 0x822F8F10, size = 0xBF0 },
-    { address = 0x8217CEC8, size = 0x148 },   # switch com tabela inline logo apos o bctr; sem .pdata
+    { address = 0x8217CEC8, size = 0x148 },   # switch with an inline table right after the bctr; no .pdata
     { address = 0x82347AA0, size = 0x118 },
     { address = 0x823963F8, size = 0x110 },
     { address = 0x823FD838, size = 0xC8 },

@@ -1,8 +1,8 @@
-# Compilacao (o exe leva o XEX do jogo embutido: nunca publicar)
+# Build output (the exe carries the game's XEX embedded: never publish it)
 build/
 out/
 
-# Arquivos do jogo e derivados (scripts Lua descompilados, dumps, caches)
+# Game files and derived data (decompiled Lua scripts, dumps, caches)
 lua_src/
 *.xex
 shader_cache/
@@ -11,18 +11,18 @@ d3d_profile.txt
 frame_*.png
 frame_*.bmp
 
-# Logs de teste
+# Test logs
 *.log
 logs/
 
-# Dependencias binarias (veja third_party/LEIA-ME.md)
+# Binary dependencies (see third_party/README.md)
 third_party/*
-!third_party/LEIA-ME.md
+!third_party/README.md
 
-# Copia antiga do inicio do projeto
+# Old copy from the start of the project
 cars-runtime/
 
-# Python / editores
+# Python / editors
 __pycache__/
 *.pyc
 .vs/

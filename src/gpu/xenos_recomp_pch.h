@@ -1,5 +1,5 @@
-// Substitui o pch.h do XenosRecomp quando o recompilador de shaders e compilado dentro do runtime
-// (so o necessario para shader_recompiler.cpp; sem DXC/zstd/smol-v aqui).
+// Replaces XenosRecomp's pch.h when the shader recompiler is built inside the runtime
+// (only what shader_recompiler.cpp needs; no DXC/zstd/smol-v here).
 #pragma once
 
 #define FMT_HEADER_ONLY

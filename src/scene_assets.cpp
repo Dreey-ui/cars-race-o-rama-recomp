@@ -1,11 +1,11 @@
-// Monta os pacotes das cenas a partir das pastas extraidas (veja scene_assets.h e tools/scenes_extract.py).
+// Builds the scene packages from the extracted folders (see scene_assets.h and tools/scenes_extract.py).
 //
-// .res (versao 3 sem compressao, como o leitor do jogo sub_821C1AA0 aceita com flags 0), little-endian:
-//   +0 versao 3, +4 tamanho do cabecalho depois de +8 (8), +8 flags 0, +12 0, diretorio {u32 quantidade, u32 tamanho,
-//   entradas {u32 tamanho do nome, nome, u32 posicao, u32 tamanho}}, dados (cada arquivo alinhado a 0x800).
-// Stream (.str cru, no layout que o .toc da pasta .res ja descreve): zera, copia _dados\*.bin e escreve por cima os
-// blocos de cada .dds, com o tiling/endian/ordem de canais do Xbox 360 (mesmas regras de tools/scenes_textures.py:
-// GetGuestTextureLayout do Xenia, mipmaps a partir de mip_address, niveis pequenos empacotados num tile).
+// .res (version 3 without compression, which the game's reader sub_821C1AA0 accepts with flags 0), little-endian:
+//   +0 version 3, +4 header size after +8 (8), +8 flags 0, +12 0, directory {u32 count, u32 size,
+//   entries {u32 name length, name, u32 offset, u32 size}}, data (each file aligned to 0x800).
+// Stream (raw .str, in the layout the .toc of the .res folder already describes): zero it, copy _data\*.bin and write the
+// blocks of each .dds on top, with the Xbox 360 tiling/endian/channel order (same rules as tools/scenes_textures.py:
+// Xenia's GetGuestTextureLayout, mipmaps starting at mip_address, small levels packed into one tile).
 #include "scene_assets.h"
 #include "gpu/model_capture.h"
 
@@ -75,6 +75,25 @@ std::vector<std::string> ReadLines(const fs::path& p)
     return lines;
 }
 
+// Index of an extracted package folder (tools/scenes_extract.py): _index.txt, or _indice.txt with the Portuguese
+// keywords of older extractions (tamanho/dados/textura -> size/data/texture)
+std::vector<std::string> ReadIndex(const fs::path& folder)
+{
+    std::error_code ec;
+    std::vector<std::string> lines = ReadLines(fs::exists(folder / L"_index.txt", ec) ? folder / L"_index.txt" : folder / L"_indice.txt");
+    static const std::pair<const char*, const char*> kOld[] = { { "tamanho ", "size " }, { "dados ", "data " }, { "textura ", "texture " } };
+    for (auto& l : lines)
+        for (const auto& [from, to] : kOld)
+            if (l.compare(0, strlen(from), from) == 0)
+            {
+                l = to + l.substr(strlen(from));
+                break;
+            }
+    return lines;
+}
+
+bool IsIndexFile(const std::string& lowerName) { return lowerName == "_index.txt" || lowerName == "_indice.txt"; }
+
 // ---------------------------------------------------------------------------------------------
 // .res
 
@@ -96,7 +115,7 @@ bool ResFolderLayout(const fs::path& folder, ResLayout& out)
     std::error_code ec;
     std::vector<std::string> names;
     std::set<std::string> seen;
-    for (std::string n : ReadLines(folder / L"_indice.txt"))
+    for (std::string n : ReadIndex(folder))
     {
         if (n.empty() || n[0] == '#')
             continue;
@@ -105,14 +124,14 @@ bool ResFolderLayout(const fs::path& folder, ResLayout& out)
         if (seen.insert(Lower(n)).second)
             names.push_back(n);
     }
-    // arquivos que o usuario colocou na pasta e nao estao no indice: no fim
+    // files the user put in the folder that are not in the index: at the end
     std::vector<std::string> extra;
     for (fs::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
     {
         if (!it->is_regular_file(ec))
             continue;
         const std::string rel = it->path().lexically_relative(folder).make_preferred().string();
-        if (Lower(rel) != "_indice.txt" && !seen.count(Lower(rel)))
+        if (!IsIndexFile(Lower(rel)) && !seen.count(Lower(rel)))
             extra.push_back(rel);
     }
     std::sort(extra.begin(), extra.end());
@@ -170,13 +189,13 @@ bool BuildRes(const fs::path& folder, std::vector<uint8_t>& out)
     for (const auto& e : layout.entries)
         if (ReadWhole(e.file, buf))
             memcpy(out.data() + layout.dataStart + e.offset, buf.data(), std::min<size_t>(buf.size(), e.size));
-    fprintf(stderr, "[mods] pacote montado da pasta %s: %zu arquivos, %.1f MB sem compressao\n", folder.string().c_str(),
+    fprintf(stderr, "[mods] package built from folder %s: %zu files, %.1f MB uncompressed\n", folder.string().c_str(),
             layout.entries.size(), layout.total / 1048576.0);
     return true;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Texturas: fetch constant do Xenos -> layout dos niveis (igual a tools/scenes_textures.py)
+// Textures: Xenos fetch constant -> level layout (same as tools/scenes_textures.py)
 
 struct Fetch
 {
@@ -206,7 +225,7 @@ struct Format
     uint32_t bw, bpb;
     Kind kind;
     uint32_t fourcc;   // Bc
-    uint32_t bits, r, g, b, a;   // Plain: mascaras do DDS
+    uint32_t bits, r, g, b, a;   // Plain: DDS masks
 };
 
 constexpr uint32_t FourCC(const char* s) { return uint32_t(s[0]) | uint32_t(s[1]) << 8 | uint32_t(s[2]) << 16 | uint32_t(s[3]) << 24; }
@@ -343,8 +362,8 @@ void Swap(uint8_t* p, size_t n, uint32_t endian)
     }
 }
 
-// Confere o .dds (DDS normal ou com cabecalho DX10) e devolve onde comecam os pixels; rgbaOrder = pixels R G B A (DX10
-// R8G8B8A8) em vez de B G R A
+// Checks the .dds (plain DDS or with a DX10 header) and returns where the pixels start; rgbaOrder = pixels R G B A (DX10
+// R8G8B8A8) instead of B G R A
 bool CheckDds(const std::vector<uint8_t>& d, const Fetch& f, const Format& fmt, uint32_t levels, size_t blocksBytes, size_t& dataStart,
               bool& rgbaOrder, std::string& why)
 {
@@ -352,14 +371,14 @@ bool CheckDds(const std::vector<uint8_t>& d, const Fetch& f, const Format& fmt, 
     rgbaOrder = false;
     if (d.size() < 128 || u32(0) != FourCC("DDS "))
     {
-        why = "nao e um arquivo DDS";
+        why = "not a DDS file";
         return false;
     }
     const uint32_t h = u32(12), w = u32(16), mips = std::max(u32(28), 1u), pfFlags = u32(80), fourcc = u32(84), bits = u32(88);
     const uint32_t caps2 = u32(112);
     dataStart = 128;
     char expect[96];
-    snprintf(expect, sizeof(expect), "%ux%u com %u mipmap(s)%s", f.width, f.height, levels, f.dimension == 3 ? ", cubo" : "");
+    snprintf(expect, sizeof(expect), "%ux%u with %u mipmap(s)%s", f.width, f.height, levels, f.dimension == 3 ? ", cube" : "");
     bool cube = (caps2 & 0x200) != 0;
     bool formatOk = false;
     if ((pfFlags & 4) && fourcc == FourCC("DX10"))
@@ -396,26 +415,26 @@ bool CheckDds(const std::vector<uint8_t>& d, const Fetch& f, const Format& fmt, 
         formatOk = bits == fmt.bits && u32(92) == fmt.r && u32(96) == fmt.g && u32(100) == fmt.b;
     if (!formatOk || w != f.width || h != f.height || mips != levels || cube != (f.dimension == 3))
     {
-        why = std::string("formato/tamanho diferente do original (o original e ") + expect + ")";
+        why = std::string("format/size differs from the original (the original is ") + expect + ")";
         return false;
     }
     if (d.size() < dataStart + blocksBytes)
     {
-        why = std::string("arquivo menor que o esperado (") + expect + ")";
+        why = std::string("file smaller than expected (") + expect + ")";
         return false;
     }
     return true;
 }
 
-// Escreve os pixels do .dds em tmp (a textura inteira, no layout do Xenos que a fetch constant descreve); o que nao e
-// pixel (enchimento dos tiles) fica como estava em tmp
+// Writes the .dds pixels into tmp (the whole texture, in the Xenos layout the fetch constant describes); whatever is not
+// a pixel (tile padding) stays as it was in tmp
 bool EncodeTexture(std::vector<uint8_t>& tmp, const uint32_t fetch[6], const std::vector<uint8_t>& dds, std::string& why)
 {
     const Fetch f = DecodeFetch(fetch);
     const Format* fmt = FindFormat(f.format);
     if (!fmt)
     {
-        why = "formato nao suportado";
+        why = "unsupported format";
         return false;
     }
     const uint32_t bw = fmt->bw, bpb = fmt->bpb, bppLog2 = Log2Floor(bpb), faces = f.dimension == 3 ? 6 : 1;
@@ -448,7 +467,7 @@ bool EncodeTexture(std::vector<uint8_t>& tmp, const uint32_t fetch[6], const std
                     const uint8_t* src = dds.data() + p;
                     if (fmt->kind == Kind::Argb)
                     {
-                        // .dds em B G R A (ou R G B A no DX10): canal c vai para o byte order[c] (swizzle da fetch constant)
+                        // .dds in B G R A (or R G B A in DX10): channel c goes to byte order[c] (fetch constant swizzle)
                         const uint8_t c[4] = { rgba ? src[0] : src[2], src[1], rgba ? src[2] : src[0], src[3] };
                         for (int ch = 0; ch < 4; ch++)
                             if (order[ch] < 4)
@@ -468,12 +487,12 @@ bool WriteTexture(std::vector<uint8_t>& stream, const uint32_t fetch[6], uint32_
     std::vector<uint8_t> dds;
     if (!ReadWhole(ddsPath, dds))
     {
-        why = "nao consegui ler o arquivo";
+        why = "could not read the file";
         return false;
     }
     if (places.empty() || places[0] + uint64_t(size) > stream.size())
     {
-        why = "posicao fora do stream";
+        why = "position outside the stream";
         return false;
     }
     std::vector<uint8_t> tmp(stream.begin() + places[0], stream.begin() + places[0] + size);
@@ -487,10 +506,10 @@ bool WriteTexture(std::vector<uint8_t>& stream, const uint32_t fetch[6], uint32_
 
 bool StreamSize(const fs::path& folder, uint64_t& size)
 {
-    for (const auto& line : ReadLines(folder / L"_indice.txt"))
-        if (line.compare(0, 8, "tamanho ") == 0)
+    for (const auto& line : ReadIndex(folder))
+        if (line.compare(0, 5, "size ") == 0)
         {
-            size = strtoull(line.c_str() + 8, nullptr, 16);
+            size = strtoull(line.c_str() + 5, nullptr, 16);
             return size != 0;
         }
     return false;
@@ -502,18 +521,18 @@ bool BuildStream(const fs::path& folder, std::vector<uint8_t>& out)
     uint64_t size = 0;
     if (!StreamSize(folder, size))
     {
-        fprintf(stderr, "[mods] ERRO %s: _indice.txt sem tamanho\n", folder.string().c_str());
+        fprintf(stderr, "[mods] ERROR %s: _index.txt without a size\n", folder.string().c_str());
         return false;
     }
     out.assign(size_t(size), 0);
-    const auto lines = ReadLines(folder / L"_indice.txt");
+    const auto lines = ReadIndex(folder);
     std::vector<uint8_t> buf;
     uint32_t datas = 0, textures = 0, errors = 0;
     for (const auto& line : lines)
-        if (line.compare(0, 6, "dados ") == 0)
+        if (line.compare(0, 5, "data ") == 0)
         {
             char* end = nullptr;
-            const uint64_t pos = strtoull(line.c_str() + 6, &end, 16);
+            const uint64_t pos = strtoull(line.c_str() + 5, &end, 16);
             const fs::path file = folder / fs::path(std::string(end && *end == ' ' ? end + 1 : ""));
             if (ReadWhole(file, buf) && pos + buf.size() <= out.size())
             {
@@ -522,18 +541,18 @@ bool BuildStream(const fs::path& folder, std::vector<uint8_t>& out)
             }
             else
             {
-                fprintf(stderr, "[mods] ERRO %s: nao consegui ler %s\n", folder.string().c_str(), file.string().c_str());
+                fprintf(stderr, "[mods] ERROR %s: could not read %s\n", folder.string().c_str(), file.string().c_str());
                 errors++;
             }
         }
     for (const auto& line : lines)
     {
-        if (line.compare(0, 8, "textura ") != 0)
+        if (line.compare(0, 8, "texture ") != 0)
             continue;
         uint32_t fetch[6], tsize;
         char places[4096], rest[1024];
         const std::string head = line.substr(0, line.find("  |"));
-        if (sscanf(head.c_str(), "textura %x %x %x %x %x %x %x %4095s %1023[^\n]", &fetch[0], &fetch[1], &fetch[2], &fetch[3], &fetch[4],
+        if (sscanf(head.c_str(), "texture %x %x %x %x %x %x %x %4095s %1023[^\n]", &fetch[0], &fetch[1], &fetch[2], &fetch[3], &fetch[4],
                    &fetch[5], &tsize, places, rest) != 9)
             continue;
         std::vector<uint32_t> pos;
@@ -550,39 +569,39 @@ bool BuildStream(const fs::path& folder, std::vector<uint8_t>& out)
         {
             textures++;
             for (uint32_t q : pos)
-                ModelCaptureTexture(folder.string(), q, rest);   // nome da textura para a captura de modelos (F11)
+                ModelCaptureTexture(folder.string(), q, rest);   // texture name for model capture (F11)
         }
         else
         {
-            fprintf(stderr, "[mods] ERRO textura %s: %s\n", rest, why.c_str());
+            fprintf(stderr, "[mods] ERROR texture %s: %s\n", rest, why.c_str());
             errors++;
         }
     }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    fprintf(stderr, "[mods] stream montado da pasta %s: %u texturas .dds, %u blocos de dados, %.1f MB em %.0f ms%s\n",
-            folder.string().c_str(), textures, datas, size / 1048576.0, ms, errors ? " (COM ERROS, veja acima)" : "");
+    fprintf(stderr, "[mods] stream built from folder %s: %u .dds textures, %u data blocks, %.1f MB in %.0f ms%s\n",
+            folder.string().c_str(), textures, datas, size / 1048576.0, ms, errors ? " (WITH ERRORS, see above)" : "");
     return true;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cena em arquivos soltos (layout de "<jogo>\cenas_extraidas", tools/scenes_decompile.py, copiado para mods\C\Scenes):
-//   <pasta da cena>\_pacote\X.x360.soi/.toc   esqueleto do pacote original (registros, setores, posicionamento)
-//   cada recurso do .toc no caminho do jogo: "C\Scenes\<Cena>\geo\Y" -> mods\C\Scenes\<Cena>\geo\Y.xng (tex\Y.dds,
-//   col\Y.gol); nomes de fora de C\Scenes ("C\ShadowMap\Tex\Y") -> <pasta do pacote>\Tex\Y.dds
-// O .soi (cabecalhos xgs/textura/colisao), o .toc (posicao/tamanho de cada recurso, blocos de cada setor) e o stream cru
-// sao gerados de novo a partir dos arquivos; os materiais nao entram no .res: sem o .xnm.bpb o jogo le o .xnm em texto.
+// Scene as loose files (layout of "<game>\extracted_scenes", tools/scenes_decompile.py, copied to mods\C\Scenes):
+//   <scene folder>\_package\X.x360.soi/.toc   skeleton of the original package (records, sectors, placement)
+//   each .toc resource at its game path: "C\Scenes\<Scene>\geo\Y" -> mods\C\Scenes\<Scene>\geo\Y.xng (tex\Y.dds,
+//   col\Y.gol); names outside C\Scenes ("C\ShadowMap\Tex\Y") -> <package folder>\Tex\Y.dds
+// The .soi (xgs/texture/collision headers), the .toc (position/size of each resource, blocks of each sector) and the raw
+// stream are regenerated from the files; materials do not go into the .res: without the .xnm.bpb the game reads the text .xnm.
 //
-// .soi (big-endian): +0 versao (0x102; 0x101 = stream sem compressao, MiniMap), +8 setores, +0xC colisoes, +0x10 modelos,
-//   +0x18 texturas, +0x1C texturas so no .soi (DDS de PC, depois das outras), +0x20 vagas A, +0x24 vagas B, +0x28/+0x30/+0x34 posicao (relativa a 0x3C) do 1o registro de modelos/
-//   colisoes/texturas; +0x50 tamanho de cada vaga de memoria do stream (A = GPU, depois B = CPU). Registro: 0x3C de
-//   posicionamento antes dele, u32 indice, nome[0x100], u32 0, u32 0/FFFFFFFF, u32 n, n propriedades x 0x208, conteudo:
-//   textura 0x38 (D3D header, fetch constant em +0x20; ou u32 tamanho + DDS de PC), xgs (= .xng sem os dados das
-//   submalhas) ou colisao 0x7C (cabecalho do .gol com flag 9 + 0 + no raiz).
-// .toc: setores {nome[0x100], 21 u32 [0, recursos, no trecho A, no trecho B, -1, vaga A, vaga B, vizinhos x8, caixa x6],
-//   registro {posicao no .str, total, A, B, A no .str, B no .str, blocos A, blocos B} (versao 0x101: so os 4 primeiros) +
-//   tamanho de cada bloco no .str, recursos x 0x118 {nome[0x100], 0, indice/-1, indice, posicao no trecho, tamanho,
-//   tipo 0 modelo / 1 textura / 2 colisao}}. Trecho A = GPU (texturas e modelos alinhados a 0x1000), B = CPU (colisoes,
-//   alinhadas a 0x80); cada bloco tem 128 KB descomprimido (no stream cru, o bloco inteiro).
+// .soi (big-endian): +0 version (0x102; 0x101 = uncompressed stream, MiniMap), +8 sectors, +0xC collisions, +0x10 models,
+//   +0x18 textures, +0x1C .soi-only textures (PC DDS, after the others), +0x20 A slots, +0x24 B slots, +0x28/+0x30/+0x34 position (relative to 0x3C) of the 1st record of models/
+//   collisions/textures; +0x50 size of each stream memory slot (A = GPU, then B = CPU). Record: 0x3C of
+//   placement before it, u32 index, name[0x100], u32 0, u32 0/FFFFFFFF, u32 n, n properties x 0x208, content:
+//   texture 0x38 (D3D header, fetch constant at +0x20; or u32 size + PC DDS), xgs (= .xng without the submesh
+//   data) or collision 0x7C (.gol header with flag 9 + 0 + root node).
+// .toc: sectors {name[0x100], 21 u32 [0, resources, in part A, in part B, -1, slot A, slot B, neighbors x8, box x6],
+//   record {position in the .str, total, A, B, A in the .str, B in the .str, A blocks, B blocks} (version 0x101: only the first 4) +
+//   size of each block in the .str, resources x 0x118 {name[0x100], 0, index/-1, index, position in its part, size,
+//   type 0 model / 1 texture / 2 collision}}. Part A = GPU (textures and models aligned to 0x1000), B = CPU (collisions,
+//   aligned to 0x80); each block is 128 KB uncompressed (in the raw stream, the whole block).
 
 uint32_t BE32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
 uint32_t BE16(const uint8_t* p) { return uint32_t(p[0]) << 8 | p[1]; }
@@ -596,7 +615,7 @@ constexpr uint32_t kBlock = 0x20000;
 
 uint32_t VertexStride(uint32_t flags)
 {
-    // posicao, normal, cor (ARGB), UV0, UV1, UV2, tangente: a ordem dos streams nos dados da submalha
+    // position, normal, color (ARGB), UV0, UV1, UV2, tangent: the order of the streams in the submesh data
     static const uint32_t bits[][2] = { { 0x01, 12 }, { 0x02, 12 }, { 0x08, 4 }, { 0x04, 8 }, { 0x10, 8 }, { 0x4000, 8 }, { 0x20, 12 } };
     uint32_t s = 0;
     for (const auto& b : bits)
@@ -605,8 +624,8 @@ uint32_t VertexStride(uint32_t flags)
     return s;
 }
 
-// Percorre um modelo: xgs (cabecalho no .soi, sem dados) ou .xng (dados de cada submalha logo depois do registro dela).
-// len = tamanho; com hdr/blob, monta o xgs (registro com "dados no stream") e os dados das submalhas em sequencia.
+// Walks a model: xgs (header in the .soi, no data) or .xng (each submesh's data right after its record).
+// len = size; with hdr/blob, builds the xgs (record marked "data in the stream") and the submesh data in sequence.
 bool WalkModel(const uint8_t* d, size_t n, bool hasData, size_t& len, std::vector<uint8_t>* hdr, std::vector<uint8_t>* blob)
 {
     if (n < 12 || memcmp(d, hasData ? "xng" : "xgs", 4) != 0)
@@ -654,7 +673,7 @@ bool WalkModel(const uint8_t* d, size_t n, bool hasData, size_t& len, std::vecto
                 {
                     const size_t at = hdr->size();
                     copy(p, p + rl);
-                    (*hdr)[at + 10] = 1;   // dados no stream
+                    (*hdr)[at + 10] = 1;   // data in the stream
                 }
                 p += rl;
                 if (hasData)
@@ -673,29 +692,29 @@ bool WalkModel(const uint8_t* d, size_t n, bool hasData, size_t& len, std::vecto
     return true;
 }
 
-// .gol (colisao solta) -> conteudo do registro no .soi (0x7C) + dados do stream (vertices float4, nos de 64 bytes alinhados
-// a 32, triangulos de 32 bytes). O .gol nao guarda os w (1.0), os zeros nem o raio do no (diagonal da caixa).
+// .gol (loose collision) -> content of the .soi record (0x7C) + stream data (float4 vertices, 64-byte nodes aligned
+// to 32, 32-byte triangles). The .gol does not store the w values (1.0), the zeros or the node radius (box diagonal).
 #pragma clang fp contract(off)
 bool GolToCol(const std::vector<uint8_t>& g, std::vector<uint8_t>& payload, std::vector<uint8_t>& blob, std::string& why)
 {
     if (g.size() < 0x5C || BE32(g.data()) != 0x4D2 || memcmp(g.data() + 4, "col", 4) != 0)
     {
-        why = "nao e um .gol";
+        why = "not a .gol";
         return false;
     }
     const uint32_t nv = BE32(&g[0x48]), nn = BE32(&g[0x4C]), nt = BE32(&g[0x50]);
     const uint64_t need = 0x58 + uint64_t(nv) * 12 + 4 + uint64_t(nn) * 32 + uint64_t(nt) * 22;
     if (need != g.size())
     {
-        why = "o tamanho do arquivo nao bate com as contagens do cabecalho (vertices/nos/triangulos)";
+        why = "file size does not match the header counts (vertices/nodes/triangles)";
         return false;
     }
     payload.assign(g.begin(), g.begin() + 0x58);
-    PutBE32(&payload[0x0C], 9);   // 9 = dados no stream
+    PutBE32(&payload[0x0C], 9);   // 9 = data in the stream
     payload.resize(0x5C, 0);
     size_t p = 0x58 + size_t(nv) * 12 + 4;
     if (nn)
-        Append(payload, &g[p], 32);   // no raiz
+        Append(payload, &g[p], 32);   // root node
     payload.resize(0x7C, 0);
     blob.clear();
     blob.reserve(size_t(nv) * 16 + 32 + size_t(nn) * 64 + size_t(nt) * 32);
@@ -707,9 +726,9 @@ bool GolToCol(const std::vector<uint8_t>& g, std::vector<uint8_t>& payload, std:
     blob.resize(AlignUp(uint32_t(blob.size()), 32), 0);
     for (uint32_t i = 0; i < nn; i++, p += 32)
     {
-        const uint8_t* q = &g[p];   // {A, minimo xyz, tamanho xyz, filhos}
+        const uint8_t* q = &g[p];   // {A, minimum xyz, size xyz, children}
         const float sx = BEF32(q + 16), sy = BEF32(q + 20), sz = BEF32(q + 24);
-        float s = sx * sx + sy * sy;   // mesma ordem de soma do jogo (bate com os streams originais)
+        float s = sx * sx + sy * sy;   // same summation order as the game (matches the original streams)
         s = s + sz * sz;
         Append(blob, q + 4, 12);
         AppendF32(blob, 1.0f);
@@ -733,7 +752,7 @@ bool GolToCol(const std::vector<uint8_t>& g, std::vector<uint8_t>& payload, std:
 }
 #pragma clang fp contract(on)
 
-// Tamanho da textura no stream pela fetch constant (fim do ultimo nivel, alinhado a 4 KB)
+// Texture size in the stream from the fetch constant (end of the last level, aligned to 4 KB)
 uint32_t TextureBytes(const uint32_t fetch[6])
 {
     const Fetch f = DecodeFetch(fetch);
@@ -749,7 +768,7 @@ uint32_t TextureBytes(const uint32_t fetch[6])
 
 struct DdsInfo
 {
-    uint32_t w = 0, h = 0, mips = 1, xenos = 0;   // xenos: formato do Xbox 360 equivalente (0 = sem suporte)
+    uint32_t w = 0, h = 0, mips = 1, xenos = 0;   // xenos: equivalent Xbox 360 format (0 = unsupported)
     bool cube = false;
 };
 
@@ -811,9 +830,9 @@ bool ReadDdsInfo(const std::vector<uint8_t>& d, uint32_t origFormat, DdsInfo& ou
     return true;
 }
 
-// Fetch constant para um .dds de outro tamanho / numero de mipmaps / formato: muda so largura, altura, pitch, formato,
-// ultimo mip e mip_address (logo depois do nivel 0); like = fetch de outra textura do pacote no formato novo quando o tipo
-// muda (DXT <-> ARGB): dela vem o endian e o swizzle
+// Fetch constant for a .dds of a different size / mipmap count / format: changes only width, height, pitch, format,
+// last mip and mip_address (right after level 0); like = fetch of another texture of the package in the new format when
+// the kind changes (DXT <-> ARGB): endian and swizzle come from it
 void MakeFetch(const uint32_t orig[6], uint32_t format, uint32_t w, uint32_t h, uint32_t levels, const uint32_t* like, uint32_t out[6])
 {
     memcpy(out, orig, 24);
@@ -838,7 +857,7 @@ void MakeFetch(const uint32_t orig[6], uint32_t format, uint32_t w, uint32_t h, 
 
 struct SoiRec
 {
-    uint32_t type;           // 0 modelo, 1 textura, 2 colisao (como no .toc)
+    uint32_t type;           // 0 model, 1 texture, 2 collision (as in the .toc)
     size_t lead, payload, payloadLen;
     std::string name;
 };
@@ -849,13 +868,13 @@ bool ParseSoi(const std::vector<uint8_t>& s, std::vector<SoiRec>& recs, std::str
 {
     if (s.size() < 0x58)
     {
-        why = ".soi curto demais";
+        why = ".soi too short";
         return false;
     }
     uint32_t h[15];
     for (int i = 0; i < 15; i++)
         h[i] = BE32(&s[4 * i]);
-    // texturas: as h[6] do stream e, logo depois, h[7] com o DDS de PC dentro do .soi (indice -1; 86 no HUB)
+    // textures: the h[6] stream ones and, right after them, h[7] with the PC DDS inside the .soi (index -1; 86 in HUB)
     const uint32_t secs[3][3] = { { 2, h[3], h[12] }, { 0, h[4], h[10] }, { 1, h[6] + h[7], h[13] } };
     for (const auto& sec : secs)
     {
@@ -864,7 +883,7 @@ bool ParseSoi(const std::vector<uint8_t>& s, std::vector<SoiRec>& recs, std::str
         {
             if (p + 0x110 > s.size())
             {
-                why = "registro fora do .soi";
+                why = "record outside the .soi";
                 return false;
             }
             SoiRec r;
@@ -875,7 +894,7 @@ bool ParseSoi(const std::vector<uint8_t>& s, std::vector<SoiRec>& recs, std::str
             const size_t q = p + 0x110 + size_t(nprops) * 0x208;
             if (nprops > 4096 || q > s.size())
             {
-                why = "propriedades de " + r.name + " fora do .soi";
+                why = "properties of " + r.name + " outside the .soi";
                 return false;
             }
             size_t len = 0;
@@ -892,7 +911,7 @@ bool ParseSoi(const std::vector<uint8_t>& s, std::vector<SoiRec>& recs, std::str
                 len = 0;
             if (!len || q + len > s.size())
             {
-                why = "conteudo de " + r.name + " nao reconhecido";
+                why = "content of " + r.name + " not recognized";
                 return false;
             }
             r.payload = q;
@@ -905,12 +924,12 @@ bool ParseSoi(const std::vector<uint8_t>& s, std::vector<SoiRec>& recs, std::str
     for (size_t i = 0; i + 1 < recs.size(); i++)
         if (recs[i].payload + recs[i].payloadLen + 0x3C != recs[i + 1].lead)
         {
-            why = "registros do .soi nao sao contiguos (" + recs[i].name + ")";
+            why = ".soi records are not contiguous (" + recs[i].name + ")";
             return false;
         }
     if (!recs.empty() && recs.back().payload + recs.back().payloadLen != s.size())
     {
-        why = "sobra no fim do .soi";
+        why = "leftover bytes at the end of the .soi";
         return false;
     }
     return true;
@@ -939,7 +958,7 @@ bool ParseToc(const std::vector<uint8_t>& t, bool blocked, std::vector<TocSector
     {
         if (p + 0x154 + recSize > t.size())
         {
-            why = "setor incompleto no .toc";
+            why = "incomplete sector in the .toc";
             return false;
         }
         TocSector s;
@@ -954,7 +973,7 @@ bool ParseToc(const std::vector<uint8_t>& t, bool blocked, std::vector<TocSector
         const uint64_t nres = s.hdr[1];
         if (nb > 1000000 || nres > 1000000 || q + nb * 4 + nres * 0x118 > t.size())
         {
-            why = "setor com contagens invalidas no .toc";
+            why = "sector with invalid counts in the .toc";
             return false;
         }
         for (uint64_t k = 0; k < nb; k++, q += 4)
@@ -1009,7 +1028,7 @@ fs::path LoosePath(const fs::path& root, const fs::path& packDir, const std::str
     return p;
 }
 
-// Conteudo novo de um recurso: dados no stream + conteudo do registro no .soi
+// New content of a resource: data in the stream + content of the .soi record
 struct LooseItem
 {
     std::vector<uint8_t> data, payload;
@@ -1021,7 +1040,7 @@ struct LooseStats
     uint32_t models = 0, textures = 0, collisions = 0, changed = 0, resized = 0;
 };
 
-// CRC32 (o mesmo do zlib), 8 bytes por passo
+// CRC32 (same as zlib's), 8 bytes per step
 uint32_t Crc32(const uint8_t* p, size_t n)
 {
     static uint32_t t[8][256];
@@ -1054,7 +1073,7 @@ uint32_t Crc32(const uint8_t* p, size_t n)
     return ~c;
 }
 
-// _pacote\X.arquivos.txt (tools/scenes_decompile.py): "CRC32 caminho" de cada arquivo solto como foi extraido
+// _package\X.files.txt (tools/scenes_decompile.py): "CRC32 path" of each loose file as it was extracted
 std::map<std::string, uint32_t> ReadManifest(const fs::path& file)
 {
     std::map<std::string, uint32_t> out;
@@ -1070,7 +1089,7 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
     std::vector<uint8_t> d;
     if (!ReadWhole(file, d))
     {
-        why = "arquivo nao encontrado";
+        why = "file not found";
         return false;
     }
     if (origCrc && Crc32(d.data(), d.size()) != *origCrc)
@@ -1082,11 +1101,11 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
         size_t len = 0;
         if (!WalkModel(d.data(), d.size(), true, len, &it.payload, &it.data))
         {
-            why = ".xng invalido";
+            why = "invalid .xng";
             return false;
         }
         if (len != d.size())
-            fprintf(stderr, "[mods] aviso: %s tem %zu bytes sobrando no fim\n", file.string().c_str(), d.size() - len);
+            fprintf(stderr, "[mods] warning: %s has %zu leftover bytes at the end\n", file.string().c_str(), d.size() - len);
     }
     else if (type == 2)
     {
@@ -1097,10 +1116,10 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
     {
         if (!rec)
         {
-            why = "textura sem registro no .soi";
+            why = "texture without a record in the .soi";
             return false;
         }
-        if (orig.size() != 0x38)   // DDS de PC dentro do pacote (MiniMap do CR_01): o .dds vai inteiro
+        if (orig.size() != 0x38)   // PC DDS inside the package (CR_01 MiniMap): the whole .dds goes in
         {
             it.payload.clear();
             AppendBE32(it.payload, uint32_t(d.size()));
@@ -1117,7 +1136,7 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
             DdsInfo di;
             if (!fmt || !ReadDdsInfo(d, f.format, di))
             {
-                why = fmt ? "nao e um arquivo DDS" : "formato do original nao suportado";
+                why = fmt ? "not a DDS file" : "format of the original not supported";
                 return false;
             }
             const uint32_t levels = uint32_t(Levels(f, fmt->bw, fmt->bpb).size());
@@ -1129,13 +1148,13 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
                 const Format* nfmt = di.xenos ? FindFormat(di.xenos) : nullptr;
                 if (!nfmt || !di.w || !di.h || di.w > 8192 || di.h > 8192 || di.cube != (f.dimension == 3))
                 {
-                    why = "formato do .dds nao suportado (use DXT1/DXT3/DXT5, ou ARGB 8888 como o original" +
-                          std::string(f.dimension == 3 ? ", cubo" : "") + ")";
+                    why = "unsupported .dds format (use DXT1/DXT3/DXT5, or ARGB 8888 like the original" +
+                          std::string(f.dimension == 3 ? ", cube" : "") + ")";
                     return false;
                 }
                 const uint32_t* like = nullptr;
                 uint32_t likeBuf[6];
-                if (nfmt->kind != fmt->kind)   // DXT <-> ARGB: endian/swizzle de outra textura do pacote nesse formato
+                if (nfmt->kind != fmt->kind)   // DXT <-> ARGB: endian/swizzle from another texture of the package in that format
                 {
                     for (const auto& r : allRecs)
                         if (r.type == 1 && r.payloadLen == 0x38)
@@ -1151,7 +1170,7 @@ bool LoadLooseItem(const fs::path& file, uint32_t type, const std::vector<uint8_
                         }
                     if (!like)
                     {
-                        why = "o pacote nao tem nenhuma textura nesse formato; salve no mesmo tipo do original";
+                        why = "the package has no texture in that format; save it in the same kind as the original";
                         return false;
                     }
                 }
@@ -1184,7 +1203,7 @@ struct LooseOut
 bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::string& stem, LooseOut& out, std::string& why)
 {
     const auto t0 = std::chrono::steady_clock::now();
-    const fs::path skel = packDir / L"_pacote";
+    const fs::path skel = packDir / L"_package";
     fs::path soiPath, tocPath;
     std::error_code ec;
     for (fs::directory_iterator it(skel, ec), end; !ec && it != end; it.increment(ec))
@@ -1198,7 +1217,7 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
     std::vector<uint8_t> soi, toc;
     if (soiPath.empty() || tocPath.empty() || !ReadWhole(soiPath, soi) || !ReadWhole(tocPath, toc))
     {
-        why = "esqueleto " + (skel / (stem + ".soi")).string() + " / .toc nao encontrado";
+        why = "skeleton " + (skel / (stem + ".soi")).string() + " / .toc not found";
         return false;
     }
     std::vector<SoiRec> recs;
@@ -1209,13 +1228,13 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
     if (!ParseToc(toc, out.blocked, sectors, why))
         return false;
     if (sectors.size() != BE32(&soi[8]))
-        fprintf(stderr, "[mods] aviso: %s: %zu setores no .toc, %u no .soi\n", stem.c_str(), sectors.size(), BE32(&soi[8]));
-    std::map<std::string, std::vector<size_t>> soiByName;   // "nome|tipo" -> registros
+        fprintf(stderr, "[mods] warning: %s: %zu sectors in the .toc, %u in the .soi\n", stem.c_str(), sectors.size(), BE32(&soi[8]));
+    std::map<std::string, std::vector<size_t>> soiByName;   // "name|type" -> records
     for (size_t i = 0; i < recs.size(); i++)
         soiByName[Lower(recs[i].name) + "|" + char('0' + recs[i].type)].push_back(i);
 
-    // Recursos: cada arquivo solto convertido uma vez (o mesmo recurso pode estar em varios setores do HUB)
-    const auto manifest = ReadManifest(skel / (stem + ".arquivos.txt"));
+    // Resources: each loose file converted once (the same resource can be in several HUB sectors)
+    const auto manifest = ReadManifest(skel / (stem + ".files.txt"));
     std::map<std::string, LooseItem> items;
     LooseStats st;
     for (const auto& s : sectors)
@@ -1244,10 +1263,10 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
             st.resized += it.resized;
             if (it.changed)
                 fprintf(stderr, "[mods] %s: %s%s\n", stem.c_str(), file.lexically_relative(root).string().c_str(),
-                        it.resized ? " (tamanho novo)" : " (modificado)");
+                        it.resized ? " (new size)" : " (modified)");
             items.emplace(key, std::move(it));
         }
-    // Texturas que so existem no .soi (DDS de PC dentro do pacote, fora do stream): o .dds solto, se houver
+    // Textures that only exist in the .soi (PC DDS inside the package, outside the stream): the loose .dds, if any
     for (const auto& r : recs)
     {
         const std::string key = Lower(r.name) + "|d";
@@ -1268,11 +1287,11 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
         st.textures++;
         st.changed += it.changed;
         if (it.changed)
-            fprintf(stderr, "[mods] %s: %s (modificado)\n", stem.c_str(), file.lexically_relative(root).string().c_str());
+            fprintf(stderr, "[mods] %s: %s (modified)\n", stem.c_str(), file.lexically_relative(root).string().c_str());
         items.emplace(key, std::move(it));
     }
 
-    // Setores: posicao de cada recurso no trecho dele (mantem as originais se nada mudou de tamanho)
+    // Sectors: position of each resource in its part (keeps the original ones if nothing changed size)
     struct SectorData
     {
         std::vector<uint8_t> a, b;
@@ -1302,7 +1321,7 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
             std::stable_sort(idx.begin(), idx.end(), [&](size_t x, size_t y) { return s.res[x].f[3] < s.res[y].f[3]; });
             const uint32_t align = part == 0 ? 0x1000 : 0x80;
             uint32_t pos = 0;
-            std::map<uint32_t, uint32_t> moved;   // posicao original -> nova (entradas repetidas no mesmo lugar)
+            std::map<uint32_t, uint32_t> moved;   // original position -> new (repeated entries at the same place)
             for (size_t k : idx)
             {
                 uint32_t o = s.res[k].f[3];
@@ -1321,7 +1340,7 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
                 newOff[si][k] = o;
                 pos = std::max(pos, o + newSize[si][k]);
             }
-            // total do trecho: o original se tudo coube; senao o fim alinhado (4 KB; 2 KB no stream sem blocos)
+            // part total: the original if everything fit; otherwise the aligned end (4 KB; 2 KB in an unblocked stream)
             ends[part] = AlignUp(pos, out.blocked ? 0x1000 : 0x800);
             const uint32_t orig = s.rec[2 + part];
             const uint32_t total = (!resized && orig >= pos) ? orig : ends[part];
@@ -1335,7 +1354,7 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
         }
     }
 
-    // Stream cru: setores na ordem original do .str; no 0x102, blocos de 128 KB (o ultimo do trecho alinhado a 4 KB)
+    // Raw stream: sectors in the original .str order; in 0x102, 128 KB blocks (the last one of each part aligned to 4 KB)
     std::vector<size_t> order;
     for (size_t si = 0; si < sectors.size(); si++)
         if (sectors[si].rec[1] || !data[si].a.empty() || !data[si].b.empty())
@@ -1377,7 +1396,7 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
         Append(out.str, data[si].b.data(), db);
     }
 
-    // .toc novo
+    // new .toc
     std::vector<uint8_t> ntoc;
     ntoc.reserve(toc.size() + 4096);
     for (size_t si = 0; si < sectors.size(); si++)
@@ -1404,15 +1423,15 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
         }
     }
 
-    // .soi novo: conteudo de cada registro trocado; posicoes das secoes e vagas de memoria do stream ajustadas
+    // new .soi: content of each record replaced; section positions and stream memory slots adjusted
     std::vector<uint8_t> nsoi;
     nsoi.reserve(soi.size() + 4096);
-    std::vector<std::pair<size_t, int64_t>> growth;   // (fim do conteudo original, crescimento acumulado ate ali)
+    std::vector<std::pair<size_t, int64_t>> growth;   // (end of the original content, accumulated growth up to there)
     int64_t grown = 0;
     size_t cursor = 0;
     auto pick = [&](const SoiRec& r) -> const LooseItem* {
         auto it = items.find(Lower(r.name) + "|" + char('0' + r.type));
-        if (r.type == 1)   // textura do stream (cabecalho 0x38) ou DDS de PC no .soi: o conteudo novo tem de ser do mesmo tipo
+        if (r.type == 1)   // stream texture (0x38 header) or PC DDS in the .soi: the new content must be of the same kind
         {
             const bool dds = r.payloadLen != 0x38;
             if (it != items.end() && (it->second.payload.size() != 0x38) == dds)
@@ -1462,12 +1481,12 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
                 const uint32_t need = recOut[si][2 + part];
                 if (need > BE32(p))
                 {
-                    fprintf(stderr, "[mods] %s: vaga %c%u do stream aumentada de %X para %X\n", stem.c_str(), part ? 'B' : 'A', slot, BE32(p), need);
+                    fprintf(stderr, "[mods] %s: stream slot %c%u grown from %X to %X\n", stem.c_str(), part ? 'B' : 'A', slot, BE32(p), need);
                     PutBE32(p, need);
                 }
             }
 
-    // .res com o .soi e o .toc novos (os materiais .xnm ficam soltos)
+    // .res with the new .soi and .toc (the .xnm materials stay loose)
     const std::string soiName = soiPath.filename().string(), tocName = tocPath.filename().string();
     const uint32_t dirSize0 = 24 + 12 * 2 + uint32_t(soiName.size() + tocName.size());
     const uint32_t dataStart = AlignUp(dirSize0, 0x800);
@@ -1493,15 +1512,15 @@ bool BuildLoosePack(const fs::path& root, const fs::path& packDir, const std::st
     memcpy(out.res.data() + dataStart, nsoi.data(), nsoi.size());
     memcpy(out.res.data() + dataStart + tocOff, ntoc.data(), ntoc.size());
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    fprintf(stderr, "[mods] cena solta montada: %s (%u modelos .xng, %u texturas .dds, %u colisoes .gol; %u modificados, %u com tamanho novo), "
-                    "stream %.1f MB em %.0f ms\n",
+    fprintf(stderr, "[mods] loose scene built: %s (%u .xng models, %u .dds textures, %u .gol collisions; %u modified, %u with a new size), "
+                    "stream %.1f MB in %.0f ms\n",
             (packDir / stem).lexically_relative(root).string().c_str(), st.models, st.textures, st.collisions, st.changed, st.resized,
             out.str.size() / 1048576.0, ms);
     return true;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Arquivo temporario por pasta, montado uma vez por execucao (apagado quando o jogo fecha)
+// Temporary file per folder, built once per run (deleted when the game closes)
 
 struct Built
 {
@@ -1531,7 +1550,7 @@ bool WriteTemp(const std::vector<uint8_t>& data, Built& out)
                            CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (h == INVALID_HANDLE_VALUE)
     {
-        fprintf(stderr, "[mods] ERRO: nao consegui criar o arquivo temporario %ls\n", path.c_str());
+        fprintf(stderr, "[mods] ERROR: could not create the temporary file %ls\n", path.c_str());
         return false;
     }
     for (size_t done = 0; done < data.size();)
@@ -1556,7 +1575,7 @@ FILE* OpenTemp(const Built& b)
     return fd >= 0 ? _fdopen(fd, "rb") : nullptr;
 }
 
-// Cenas soltas: .res e .str montados juntos (o .toc depende do layout do stream), uma vez por execucao
+// Loose scenes: .res and .str built together (the .toc depends on the stream layout), once per run
 struct LooseBuilt
 {
     bool tried = false, ok = false, blocked = true;
@@ -1573,7 +1592,7 @@ LooseBuilt* GetLoose(const fs::path& root, const fs::path& packDir, const std::s
         LooseOut out;
         std::string why;
         if (!BuildLoosePack(root, packDir, stem, out, why))
-            fprintf(stderr, "[mods] ERRO cena solta %s: %s (usando o pacote original do jogo)\n", (packDir / stem).string().c_str(), why.c_str());
+            fprintf(stderr, "[mods] ERROR loose scene %s: %s (using the game's original package)\n", (packDir / stem).string().c_str(), why.c_str());
         else
         {
             b.blocked = out.blocked;
@@ -1587,7 +1606,7 @@ LooseBuilt* GetLoose(const fs::path& root, const fs::path& packDir, const std::s
 bool LooseSceneExists(const fs::path& packDir, const std::string& stem)
 {
     std::error_code ec;
-    return fs::is_regular_file(packDir / L"_pacote" / (stem + ".soi"), ec) && fs::is_regular_file(packDir / L"_pacote" / (stem + ".toc"), ec);
+    return fs::is_regular_file(packDir / L"_package" / (stem + ".soi"), ec) && fs::is_regular_file(packDir / L"_package" / (stem + ".toc"), ec);
 }
 
 FILE* LooseSceneOpen(const fs::path& root, const fs::path& packDir, const std::string& stem, bool stream, uint64_t& size, bool& rawBlocks)
@@ -1618,7 +1637,7 @@ bool LooseSceneBuildFiles(const fs::path& root, const fs::path& packDir, const s
     std::string why;
     if (!BuildLoosePack(root, packDir, stem, out, why))
     {
-        fprintf(stderr, "ERRO: %s\n", why.c_str());
+        fprintf(stderr, "ERROR: %s\n", why.c_str());
         return false;
     }
     for (const auto& [path, data] : { std::make_pair(&outRes, &out.res), std::make_pair(&outStr, &out.str) })

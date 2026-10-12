@@ -1,5 +1,5 @@
-// Profiler estatistico do codigo do HOST (CARS_HOST_SAMPLE=1): amostra o RIP (e 3 retornos, via unwind) das threads
-// registradas a cada ~1 ms e imprime os RVAs mais frequentes a cada 20 s. Simbolizar: tools/symbolize.py
+// Statistical profiler for HOST code (CARS_HOST_SAMPLE=1): samples RIP (plus 3 return addresses, via unwind) of the
+// registered threads every ~1 ms and prints the most frequent RVAs every 20 s. Symbolize with tools/symbolize.py
 #include <windows.h>
 #include <tlhelp32.h>
 #include <timeapi.h>
@@ -38,7 +38,7 @@ int Capture(HANDLE t, uint64_t (&frames)[kDepth])
     int n = 0;
     if (GetThreadContext(t, &c))
     {
-        // Sem alocacao enquanto a thread esta suspensa (ela pode estar com o lock do heap)
+        // No allocation while the thread is suspended (it may be holding the heap lock)
         for (; n < kDepth; n++)
         {
             frames[n] = c.Rip;
@@ -48,7 +48,7 @@ int Capture(HANDLE t, uint64_t (&frames)[kDepth])
             {
                 if (c.Rsp == 0)
                     break;
-                c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);   // funcao folha
+                c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);   // leaf function
                 c.Rsp += 8;
                 continue;
             }
@@ -67,13 +67,13 @@ int Capture(HANDLE t, uint64_t (&frames)[kDepth])
 }
 }  // namespace
 
-// Uso de CPU por thread do processo (CARS_THREADS=1), a cada 5 s: mostra quem e o gargalo
+// CPU usage per process thread (CARS_THREADS=1), every 5 s: shows who the bottleneck is
 void HostThreadUsageStart()
 {
     if (!getenv("CARS_THREADS"))
         return;
     std::thread([] {
-        SetThreadDescription(GetCurrentThread(), L"monitor de threads");
+        SetThreadDescription(GetCurrentThread(), L"thread monitor");
         std::unordered_map<DWORD, uint64_t> last;
         auto lastWall = std::chrono::steady_clock::now();
         for (;;)
@@ -135,8 +135,8 @@ void HostProfilerRegisterCurrentThread(const char* name)
     wchar_t wname[64];
     MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, 64);
     SetThreadDescription(GetCurrentThread(), wname);
-    // CARS_HOST_SAMPLE=1: todas as threads registradas; outro valor: so as que tem esse texto no nome
-    // (ex.: CARS_HOST_SAMPLE=822D3158 para a thread guest com essa entrada, "gpu cp" para o processador de comandos)
+    // CARS_HOST_SAMPLE=1: all registered threads; any other value: only those whose name contains that text
+    // (e.g. CARS_HOST_SAMPLE=822D3158 for the guest thread with that entry point, "gpu cp" for the command processor)
     const char* filter = getenv("CARS_HOST_SAMPLE");
     if (!filter || (strcmp(filter, "1") != 0 && !strstr(name, filter)))
         return;
@@ -150,7 +150,7 @@ void HostProfilerRegisterCurrentThread(const char* name)
     g_started = true;
     std::thread([] {
         const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-        // Enderecos fora do exe: "dll+offset" (modulo descoberto depois de soltar a thread)
+        // Addresses outside the exe: "dll+offset" (module found after resuming the thread)
         std::unordered_map<uint64_t, std::string> modNames;
         auto describe = [&](uint64_t addr) -> std::string {
             HMODULE m = nullptr;
@@ -192,7 +192,7 @@ void HostProfilerRegisterCurrentThread(const char* name)
                 self[frames[0] - base]++;
                 if (frames[0] - base > 0x40000000)
                 {
-                    // primeiro endereco de retorno dentro do exe = quem chamou a DLL
+                    // first return address inside the exe = whoever called the DLL
                     std::string key = describe(frames[0]);
                     const std::string mod = key.substr(0, key.find('+'));
                     for (int i = 1; i < n; i++)
@@ -204,7 +204,7 @@ void HostProfilerRegisterCurrentThread(const char* name)
                             break;
                         }
                 }
-                // "inclusivo" aproximado: cada endereco de retorno distinto da pilha curta
+                // approximate "inclusive": each distinct return address of the short stack
                 for (int i = 1; i < n; i++)
                     incl[frames[i] - base]++;
             }
@@ -218,9 +218,9 @@ void HostProfilerRegisterCurrentThread(const char* name)
                                 (unsigned long long)v[i].first);
                     m.clear();
                 };
-                fprintf(stderr, "[host] %u amostras\n", samples);
+                fprintf(stderr, "[host] %u samples\n", samples);
                 dump("self", self);
-                dump("pilha", incl);
+                dump("stack", incl);
                 {
                     std::vector<std::pair<std::string, uint32_t>> v(dllSelf.begin(), dllSelf.end());
                     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });

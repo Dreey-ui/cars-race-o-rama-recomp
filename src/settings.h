@@ -1,4 +1,4 @@
 #pragma once
 
-// Le um inteiro de "<nome do exe>.ini" (ao lado do exe; criado com os padroes se nao existir)
+// Reads an integer from "<exe name>.ini" (next to the exe; created with the defaults if missing)
 int SettingsGetInt(const wchar_t* section, const wchar_t* key, int defaultValue);

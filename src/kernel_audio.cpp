@@ -1,8 +1,8 @@
-// Audio: driver de render do XAudio (como o AudioSystem do Xenia). O motor de audio do jogo (XAudio2 estatico) registra
-// um callback que o sistema chama a cada 5,333 ms (256 amostras a 48 kHz); o callback mistura e entrega um frame via
-// XAudioSubmitRenderDriverFrame: 6 canais (5.1: FL FR FC LFE BL BR) x 256 amostras, float big-endian, um canal apos o outro.
-// Os frames vao para uma voz 5.1 do XAudio2 do Windows (que faz o downmix para os alto-falantes do PC). O ritmo do callback
-// segue a fila do dispositivo: o relogio da placa de som manda, sem acumular atraso nem faltar amostra.
+// Audio: XAudio render driver (like Xenia's AudioSystem). The game's audio engine (static XAudio2) registers
+// a callback that the system calls every 5.333 ms (256 samples at 48 kHz); the callback mixes and delivers a frame via
+// XAudioSubmitRenderDriverFrame: 6 channels (5.1: FL FR FC LFE BL BR) x 256 samples, big-endian float, one channel after another.
+// The frames go to a 5.1 voice of Windows XAudio2 (which downmixes to the PC speakers). The callback pacing
+// follows the device queue: the sound card clock rules, with no accumulated delay and no missing samples.
 #include "kernel.h"
 
 #include <algorithm>
@@ -20,7 +20,7 @@ struct AudioClient
 {
     bool inUse = false;
     uint32_t callback = 0;
-    uint32_t argPtr = 0;   // ponteiro guest para uma palavra com o argumento (o callback recebe o ponteiro)
+    uint32_t argPtr = 0;   // guest pointer to a word holding the argument (the callback receives the pointer)
 };
 
 static std::mutex g_audioMutex;
@@ -28,11 +28,11 @@ static AudioClient g_clients[8];
 static std::atomic<bool> g_audioThreadStarted{ false };
 static std::atomic<uint64_t> g_framesSubmitted{ 0 };
 
-// ---- saida no host (XAudio2 2.9 do Windows 10) ----
+// ---- host output (Windows 10 XAudio2 2.9) ----
 namespace
 {
 constexpr uint32_t kFrameSamples = 256, kChannels = 6, kRing = 64;
-constexpr uint32_t kTargetQueued = 6;   // ~32 ms de latencia
+constexpr uint32_t kTargetQueued = 6;   // ~32 ms of latency
 IXAudio2* g_xa = nullptr;
 IXAudio2MasteringVoice* g_master = nullptr;
 IXAudio2SourceVoice* g_voice = nullptr;
@@ -41,26 +41,26 @@ alignas(16) float g_ring[kRing][kFrameSamples * kChannels];
 uint32_t g_ringPos = 0;
 std::atomic<float> g_peak{ 0.0f };
 std::atomic<uint32_t> g_dropped{ 0 };
-// Ultimos 10 s do mix (estereo 16 bits): F12 do log de sessao salva em marca_NN\som_ultimos_10s.wav
-constexpr uint32_t kRecentSamples = 48000 * 10;   // multiplo de kFrameSamples
+// Last 10 s of the mix (16-bit stereo): the session log's F12 saves it in mark_NN\audio_last_10s.wav
+constexpr uint32_t kRecentSamples = 48000 * 10;   // multiple of kFrameSamples
 int16_t g_recent[kRecentSamples * 2];
 uint32_t g_recentPos = 0;
 bool g_recentFull = false;
 
 bool InitHostAudio()
 {
-    // O XAudio2 usa o MMDevice (COM) para achar a placa de som
+    // XAudio2 uses MMDevice (COM) to find the sound card
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     HRESULT hr = XAudio2Create(&g_xa, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr))
     {
-        fprintf(stderr, "[audio] XAudio2Create falhou (%08X): sem som\n", unsigned(hr));
+        fprintf(stderr, "[audio] XAudio2Create failed (%08X): no sound\n", unsigned(hr));
         return false;
     }
     hr = g_xa->CreateMasteringVoice(&g_master);
     if (FAILED(hr))
     {
-        fprintf(stderr, "[audio] sem dispositivo de saida de audio (CreateMasteringVoice %08X)\n", unsigned(hr));
+        fprintf(stderr, "[audio] no audio output device (CreateMasteringVoice %08X)\n", unsigned(hr));
         return false;
     }
     WAVEFORMATEXTENSIBLE fmt{};
@@ -78,13 +78,13 @@ bool InitHostAudio()
     fmt.SubFormat = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
     if (FAILED(g_xa->CreateSourceVoice(&g_voice, &fmt.Format, 0, XAUDIO2_DEFAULT_FREQ_RATIO)))
     {
-        fprintf(stderr, "[audio] CreateSourceVoice (5.1 float 48 kHz) falhou\n");
+        fprintf(stderr, "[audio] CreateSourceVoice (5.1 float 48 kHz) failed\n");
         return false;
     }
     g_voice->Start();
     XAUDIO2_VOICE_DETAILS details{};
     g_master->GetVoiceDetails(&details);
-    fprintf(stderr, "[audio] saida XAudio2: %u canais a %u Hz\n", details.InputChannels, details.InputSampleRate);
+    fprintf(stderr, "[audio] XAudio2 output: %u channels at %u Hz\n", details.InputChannels, details.InputSampleRate);
     return true;
 }
 
@@ -123,7 +123,7 @@ void SubmitHostFrame(uint32_t guestSamples)
         }
     if (peak > g_peak.load())
         g_peak = peak;
-    // Downmix estereo 16 bits: anel dos ultimos 10 s e CARS_AUDIO_DUMP=1 (grava tudo em audio_dump.raw para conferir o som)
+    // 16-bit stereo downmix: ring of the last 10 s and CARS_AUDIO_DUMP=1 (writes everything to audio_dump.raw to check the sound)
     int16_t* st = g_recent + size_t(g_recentPos) * 2;
     for (uint32_t s = 0; s < kFrameSamples; s++)
     {
@@ -152,7 +152,7 @@ void SubmitHostFrame(uint32_t guestSamples)
 }
 }  // namespace
 
-// F12 (log de sessao): ultimos 10 s do som em WAV estereo 16 bits 48 kHz
+// F12 (session log): last 10 s of audio as 16-bit 48 kHz stereo WAV
 bool AudioSaveRecent(const std::filesystem::path& path)
 {
     std::vector<int16_t> pcm;
@@ -202,7 +202,7 @@ static void AudioThread()
     uint64_t lastFrames = 0;
     for (;;)
     {
-        // Ritmo base de 5,333 ms, corrigido pela fila do dispositivo: fila baixa -> adianta, fila cheia -> espera
+        // Base pacing of 5.333 ms, corrected by the device queue: low queue -> run ahead, full queue -> wait
         const uint32_t queued = hostOk ? QueuedFrames() : kTargetQueued;
         int64_t us = 5333;
         if (queued < kTargetQueued - 2)
@@ -212,9 +212,9 @@ static void AudioThread()
         next += std::chrono::microseconds(us);
         std::this_thread::sleep_until(next);
         if (clock::now() - next > std::chrono::milliseconds(100))
-            next = clock::now();   // ficou muito para tras (depurador, etc.): nao tenta compensar
+            next = clock::now();   // fell far behind (debugger, etc.): do not try to catch up
         if (hostOk && QueuedFrames() >= kRing - 4)
-            continue;   // dispositivo parado/cheio: nao gera mais
+            continue;   // device stopped/full: do not generate more
         for (int i = 0; i < 8; i++)
         {
             uint32_t cb, arg;
@@ -234,7 +234,7 @@ static void AudioThread()
             extern void XmaTakeStats(uint64_t& packets, uint64_t& blocks);
             uint64_t xmaPackets = 0, xmaBlocks = 0;
             XmaTakeStats(xmaPackets, xmaBlocks);
-            fprintf(stderr, "[audio] %.0f frames/s, pico %.3f, fila %u, descartados %u | XMA: %llu pacotes, %llu blocos de saida\n",
+            fprintf(stderr, "[audio] %.0f frames/s, peak %.3f, queue %u, dropped %u | XMA: %llu packets, %llu output blocks\n",
                     (frames - lastFrames) / std::chrono::duration<double>(clock::now() - lastReport).count(), g_peak.exchange(0.0f),
                     QueuedFrames(), g_dropped.exchange(0), (unsigned long long)xmaPackets, (unsigned long long)xmaBlocks);
             lastFrames = frames;
@@ -275,7 +275,7 @@ KERNEL_IMPORT(XAudioRegisterRenderDriverClient)
     if (driverPtr)
         W32(driverPtr, 0x41550000u | uint32_t(index));
     if (g_traceImports)
-        fprintf(stderr, "[audio] cliente %d registrado (callback %08X, arg %08X)\n", index, R32(cbPtr), R32(cbPtr + 4));
+        fprintf(stderr, "[audio] client %d registered (callback %08X, arg %08X)\n", index, R32(cbPtr), R32(cbPtr + 4));
     if (!g_audioThreadStarted.exchange(true))
         std::thread(AudioThread).detach();
     ctx.r3.u64 = 0;
@@ -292,7 +292,7 @@ KERNEL_IMPORT(XAudioUnregisterRenderDriverClient)
 
 KERNEL_IMPORT(XAudioSubmitRenderDriverFrame)
 {
-    // (driver, amostras: 6 canais x 256 em float big-endian)
+    // (driver, samples: 6 channels x 256 as big-endian float)
     g_framesSubmitted++;
     if (ctx.r4.u32)
         SubmitHostFrame(ctx.r4.u32);
@@ -302,7 +302,7 @@ KERNEL_IMPORT(XAudioSubmitRenderDriverFrame)
 KERNEL_IMPORT(XAudioGetSpeakerConfig)
 {
     if (ctx.r3.u32)
-        W32(ctx.r3.u32, 0x00010001);   // estereo
+        W32(ctx.r3.u32, 0x00010001);   // stereo
     ctx.r3.u64 = 0;
 }
 

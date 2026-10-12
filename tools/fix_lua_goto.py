@@ -1,6 +1,6 @@
-# Reescreve os 4 trechos em que o unluac gerou goto (Lua 5.2), que o Lua 5.1 do jogo nao aceita.
-# Todos sao "if a ~= X and b ~= Y then pula" (um "or" que o descompilador nao reconstruiu).
-# Uso: python -I tools/fix_lua_goto.py lua_src
+# Rewrites the 4 spots where unluac generated goto (Lua 5.2), which the game's Lua 5.1 does not accept.
+# All of them are "if a ~= X and b ~= Y then jump" (an "or" the decompiler did not rebuild).
+# Usage: python -I tools/fix_lua_goto.py lua_src
 import os
 import sys
 
@@ -109,9 +109,9 @@ for rel, reps in fixes.items():
     text = open(path, encoding="latin-1").read().replace("\r\n", "\n")
     for old, new in reps:
         if old not in text:
-            print("NAO ACHEI o trecho em", rel)
+            print("SPOT NOT FOUND in", rel)
             continue
         text = text.replace(old, new)
     open(path, "w", encoding="latin-1", newline="\n").write(text)
     left = text.count("goto ")
-    print("%s: %s" % (rel, "ok" if left == 0 else "%d goto restantes" % left))
+    print("%s: %s" % (rel, "ok" if left == 0 else "%d goto left" % left))

@@ -1,5 +1,5 @@
-# Converte .dds (DXT1/DXT3/DXT5 ou A8R8G8B8 sem compressao, nivel 0) em .png, para conferir as cores originais.
-# Uso: python -I tools/dds2png.py arquivo.dds [saida.png]
+# Converts .dds (DXT1/DXT3/DXT5 or uncompressed A8R8G8B8, level 0) to .png, to check the original colors.
+# Usage: python -I tools/dds2png.py file.dds [out.png]
 import struct
 import sys
 import zlib
@@ -60,7 +60,7 @@ def main():
         for i in range(w * h):
             b, g, r, a = data[p + 4 * i:p + 4 * i + 4]
             out[4 * i:4 * i + 4] = bytes([r, g, b, a])
-    # fundo xadrez cinza para ver o alfa
+    # gray checkerboard background to see the alpha
     rows = bytearray()
     for y in range(h):
         rows.append(0)

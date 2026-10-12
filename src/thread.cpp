@@ -13,16 +13,16 @@ static std::atomic<uint32_t> g_nextThreadId{ 1 };
 
 GuestThread* CurrentThread() { return t_thread; }
 
-// Campos das estruturas do kernel que o jogo realmente lê:
-//   r13 -> PCR:  +0x070 base da pilha, +0x074 limite da pilha, +0x100 KTHREAD atual,
-//                +0x10C CPU atual, +0x150 KPRCB (primeiro campo: KTHREAD atual)
-//   KTHREAD:     +0x058 limite da pilha, +0x05C base da pilha, +0x14C id da thread
+// Kernel structure fields the game actually reads:
+//   r13 -> PCR:  +0x070 stack base, +0x074 stack limit, +0x100 current KTHREAD,
+//                +0x10C current CPU, +0x150 KPRCB (first field: current KTHREAD)
+//   KTHREAD:     +0x058 stack limit, +0x05C stack base, +0x14C thread id
 static std::mutex g_threadMapMutex;
 static std::unordered_map<uint32_t, GuestThread*> g_threadsByKthread;
 
-// Processador "atual" da thread (0..5): PCR+0x10C (prcb.current_cpu) e KTHREAD+0xBF, como no Xenia.
-// O XAudio2 e o sistema de jobs do jogo usam esse numero para indexar barreiras de espera ativa: se duas threads
-// tiverem o mesmo numero (ou um numero diferente do que o jogo pediu na afinidade) elas giram sem fim.
+// "Current" processor of the thread (0..5): PCR+0x10C (prcb.current_cpu) and KTHREAD+0xBF, as in Xenia.
+// The game's XAudio2 and job system use this number to index busy-wait barriers: if two threads
+// have the same number (or a different number than the game asked for in the affinity) they spin forever.
 void KSetThreadCpu(GuestThread* gt, uint32_t cpu)
 {
     W8(gt->pcr + 0x10C, uint8_t(cpu));
@@ -38,7 +38,7 @@ GuestThread* KFindThreadByKthread(uint32_t kthread)
     return it != g_threadsByKthread.end() ? it->second : nullptr;
 }
 
-// Mascara de afinidade -> processador (o menor bit); sem mascara: o mesmo processador da thread que criou
+// Affinity mask -> processor (lowest bit); no mask: the same processor as the creating thread
 static uint32_t CpuFromAffinity(uint32_t mask)
 {
     if (mask & 0x3F)
@@ -153,7 +153,7 @@ static void GuestThreadMain(KObjectPtr obj, GuestThread* gt, uint32_t startup, u
 uint32_t KCreateGuestThread(uint32_t stackSize, uint32_t startup, uint32_t startRoutine, uint32_t startContext,
                             bool suspended, uint32_t* handleOut, uint32_t* tidOut, uint32_t creationFlags)
 {
-    // Byte alto dos flags de criacao = mascara de processadores (XSetThreadProcessor / CreateThread do XDK)
+    // High byte of the creation flags = processor mask (XDK XSetThreadProcessor / CreateThread)
     GuestThread* gt = KSetupGuestThread(stackSize, creationFlags >> 24);
 
     auto obj = std::make_shared<KObject>();
@@ -173,7 +173,7 @@ uint32_t KCreateGuestThread(uint32_t stackSize, uint32_t startup, uint32_t start
 
 void KSetCurrentThread(GuestThread* gt) { t_thread = gt; }
 
-// ---- Diagnostico: amostragem das pilhas guest (CARS_STACKS=1) ----
+// ---- Diagnostics: guest stack sampling (CARS_STACKS=1) ----
 static std::mutex g_sampleMutex;
 static std::vector<GuestThread*> g_sampleThreads;
 
@@ -182,7 +182,7 @@ void KRegisterThreadForSampling(GuestThread* gt)
     char name[64];
     snprintf(name, sizeof(name), "guest %u (%08X)", gt->threadId, gt->entry);
     extern void HostProfilerRegisterCurrentThread(const char* name);
-    HostProfilerRegisterCurrentThread(name);   // nome da thread + profiler nativo (CARS_HOST_SAMPLE)
+    HostProfilerRegisterCurrentThread(name);   // thread name + native profiler (CARS_HOST_SAMPLE)
     std::lock_guard<std::mutex> lock(g_sampleMutex);
     g_sampleThreads.push_back(gt);
 }
@@ -197,20 +197,20 @@ void KDumpGuestStacks()
         if (!gt->ctx)
             continue;
         const PPCContext& c = *gt->ctx;
-        fprintf(stderr, "[pilha] thread %u (entrada %08X): lr=%08X r3=%08X |", gt->threadId, gt->entry, uint32_t(c.lr), c.r3.u32);
+        fprintf(stderr, "[stack] thread %u (entry %08X): lr=%08X r3=%08X |", gt->threadId, gt->entry, uint32_t(c.lr), c.r3.u32);
         uint32_t sp = c.r1.u32;
         for (int i = 0; i < 14 && InStack(gt, sp); i++)
         {
             const uint32_t next = R32(sp);
             if (!InStack(gt, next) || next <= sp)
                 break;
-            fprintf(stderr, " %08X", R32(next - 8));   // LR salvo pelo prologo (r12 em -8 do frame do chamador)
+            fprintf(stderr, " %08X", R32(next - 8));   // LR saved by the prologue (r12 at -8 of the caller's frame)
             sp = next;
         }
         fprintf(stderr, "\n");
     }
 }
-// Le a pilha guest de uma thread (protegido: a thread pode estar mudando de pilha ou ter terminado)
+// Reads a thread's guest stack (guarded: the thread may be switching stacks or may have exited)
 static bool SampleThread(GuestThread* gt, char* buf, size_t size)
 {
     __try
@@ -233,7 +233,7 @@ static bool SampleThread(GuestThread* gt, char* buf, size_t size)
     }
 }
 
-// Profiler estatistico (CARS_SAMPLE=1): amostra as pilhas guest a cada 10 ms e mostra as mais frequentes
+// Statistical profiler (CARS_SAMPLE=1): samples the guest stacks every 10 ms and shows the most frequent ones
 void KStartSamplingProfiler()
 {
     std::thread([] {
@@ -259,9 +259,9 @@ void KStartSamplingProfiler()
             {
                 std::vector<std::pair<std::string, uint32_t>> v(hist.begin(), hist.end());
                 std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
-                fprintf(stderr, "[amostras] %u amostras:\n", samples);
+                fprintf(stderr, "[samples] %u samples:\n", samples);
                 for (size_t i = 0; i < v.size() && i < 25; i++)
-                    fprintf(stderr, "[amostras] %5.1f%% %s\n", 100.0 * v[i].second / samples, v[i].first.c_str());
+                    fprintf(stderr, "[samples] %5.1f%% %s\n", 100.0 * v[i].second / samples, v[i].first.c_str());
                 hist.clear();
                 samples = 0;
                 last = std::chrono::steady_clock::now();
@@ -270,7 +270,7 @@ void KStartSamplingProfiler()
     }).detach();
 }
 
-// ---- APCs de usuario ----
+// ---- User APCs ----
 void KQueueApc(uint32_t routine, uint32_t context, uint32_t arg1, uint32_t arg2)
 {
     if (GuestThread* gt = CurrentThread())
@@ -287,7 +287,7 @@ bool KDeliverApcs(PPCContext& ctx)
     auto c = std::make_unique<PPCContext>();
     for (const auto& a : list)
     {
-        // Roda a rotina num contexto copiado, com a pilha abaixo da do chamador
+        // Run the routine on a copied context, with the stack below the caller's
         *c = ctx;
         c->r1.u64 = (ctx.r1.u32 - 0x1000) & ~0xFu;
         c->r3.u64 = a.context;

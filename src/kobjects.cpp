@@ -38,7 +38,7 @@ void KRegisterGuestObject(uint32_t guestPtr, const KObjectPtr& obj)
     g_guestObjects[guestPtr] = obj;
 }
 
-// Objetos que o jogo monta sozinho na memória guest. O 1º byte é o tipo, +4 é o SignalState.
+// Objects the game builds by itself in guest memory. Byte 0 is the type, +4 is SignalState.
 KObjectPtr KGetGuestObject(uint32_t guestPtr)
 {
     std::lock_guard<std::mutex> lock(g_kmtx);
@@ -50,7 +50,7 @@ KObjectPtr KGetGuestObject(uint32_t guestPtr)
     obj->guestPtr = guestPtr;
     switch (R8(guestPtr))
     {
-    case 1:  // evento de sincronização (auto-reset)
+    case 1:  // synchronization event (auto-reset)
         obj->type = KType::Event;
         obj->manualReset = false;
         obj->signaled = R32(guestPtr + 4) != 0;
@@ -63,7 +63,7 @@ KObjectPtr KGetGuestObject(uint32_t guestPtr)
         obj->count = (int32_t)R32(guestPtr + 4);
         obj->limit = (int32_t)R32(guestPtr + 0x10);
         break;
-    default: // 0: evento de notificação (manual-reset)
+    default: // 0: notification event (manual-reset)
         obj->type = KType::Event;
         obj->manualReset = true;
         obj->signaled = R32(guestPtr + 4) != 0;
@@ -138,7 +138,7 @@ uint32_t KWait(const std::vector<KObjectPtr>& objects, bool waitAll, int64_t tim
         {
             if (g_kcv.wait_for(lock, std::chrono::seconds(3)) == std::cv_status::timeout && g_traceImports)
             {
-                fprintf(stderr, "[espera] thread %u bloqueada ha mais de 3s esperando %zu objeto(s) (tipo %d)\n",
+                fprintf(stderr, "[wait] thread %u blocked for over 3s waiting on %zu object(s) (type %d)\n",
                         me, objects.size(), objects.empty() ? -1 : (int)objects[0]->type);
                 fflush(stderr);
             }
@@ -166,7 +166,7 @@ int64_t KTimeoutFromGuest(uint32_t timeoutPtr)
         const int64_t ms = (-v) / 10000;
         return ms > 0 ? ms : 1;
     }
-    return 0;   // tempos absolutos ainda não suportados: age como poll
+    return 0;   // absolute timeouts not supported yet: behaves as a poll
 }
 
 std::string KReadGuestAnsi(uint32_t ansiStringPtr)

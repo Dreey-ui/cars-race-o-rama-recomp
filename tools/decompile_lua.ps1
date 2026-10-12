@@ -1,7 +1,7 @@
-# Descompila todos os scripts Lua do jogo (*.lua.bin: 4 bytes de tamanho + bytecode Lua 5.1 com numeros float)
-# para lua_src\<mesmo caminho>\X.lua (fontes de referencia, editaveis).
-# Para mudar um script: copie o .lua para mods\<mesmo caminho>\X.lua e edite; o runtime usa no lugar do X.lua.bin.
-# Uso: powershell -File tools\decompile_lua.ps1 [-Game "<pasta da ISO>"] [-Out lua_src]
+# Decompiles all the game's Lua scripts (*.lua.bin: 4-byte size + Lua 5.1 bytecode with float numbers)
+# to lua_src\<same path>\X.lua (reference sources, editable).
+# To change a script: copy the .lua to mods\<same path>\X.lua and edit it; the runtime uses it instead of X.lua.bin.
+# Usage: powershell -File tools\decompile_lua.ps1 [-Game "<game folder>"] [-Out lua_src]
 param(
     [string]$Game = "C:\Games\Cars Race-O-Rama Recomp",
     [string]$Out = "$PSScriptRoot\..\lua_src"
@@ -19,7 +19,7 @@ foreach ($f in $files) {
     New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
     $b = [IO.File]::ReadAllBytes($f.FullName)
     if ($b.Length -gt 4 -and $b[4] -ne 0x1B) {
-        # ja e codigo-fonte (ex.: FE_FrontEnd): so tira o prefixo de tamanho
+        # already source code (e.g. FE_FrontEnd): just strip the size prefix
         [IO.File]::WriteAllBytes($dst, $b[4..($b.Length - 1)])
         $ok++
         continue
@@ -34,8 +34,8 @@ foreach ($f in $files) {
         $fail += $rel
     }
 }
-"descompilados: $ok de $($files.Count) -> $Out"
-if ($fail) { "falharam:"; $fail }
+"decompiled: $ok of $($files.Count) -> $Out"
+if ($fail) { "failed:"; $fail }
 
-# Corrige os trechos com goto (Lua 5.2) que o unluac gera em 4 arquivos
+# Fixes the goto spots (Lua 5.2) that unluac generates in 4 files
 python -I "$PSScriptRoot\fix_lua_goto.py" $Out

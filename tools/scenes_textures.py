@@ -1,11 +1,11 @@
-# Texturas dos streams das cenas (.x360.str) <-> arquivos .dds de PC (usado por tools/scenes_extract.py, que monta
-# a pasta mods\...\X.x360.str\ com write_stream_folder; o runtime faz o caminho inverso em src/scene_assets.cpp).
-# O .dds editado tem que ter o mesmo formato, tamanho e numero de mipmaps do original (o espaco no stream e fixo).
+# Textures of the scene streams (.x360.str) <-> PC .dds files (used by tools/scenes_extract.py, which builds
+# the mods\...\X.x360.str\ folder with write_stream_folder; the runtime does the reverse in src/scene_assets.cpp).
+# An edited .dds must keep the format, size and mipmap count of the original (the space in the stream is fixed).
 #
-# Onde fica cada textura: no .soi, registros {nome[0x100], ..., cabecalho D3D do 360 com a fetch constant de 6 dwords
-# (assinatura BaseFlush/MipFlush = FFFF0000 FFFF0000 em +0x124)}; no .toc, {nome[0x100], u32 registro de stream,
-# u32 indice, u32 indice, u32 posicao no trecho A descomprimido do registro, u32 tamanho, u32 1}. Os mipmaps ficam em
-# mip_address (relativo ao inicio da textura); niveis <= 16 texels empacotados num tile (GetPackedMipOffset do Xenia).
+# Where each texture is: in the .soi, records {name[0x100], ..., 360 D3D header with the 6-dword fetch constant
+# (BaseFlush/MipFlush signature = FFFF0000 FFFF0000 at +0x124)}; in the .toc, {name[0x100], u32 stream record,
+# u32 index, u32 index, u32 position in the record's decompressed part A, u32 size, u32 1}. Mipmaps live at
+# mip_address (relative to the texture start); levels <= 16 texels are packed into one tile (Xenia's GetPackedMipOffset).
 import argparse
 import bisect
 import os
@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scenes_extract as se   # noqa: E402
 
-# formato Xenos -> (largura do bloco, bytes por bloco, fourcc DDS ou None para RGB, mascaras RGB)
+# Xenos format -> (block width, bytes per block, DDS fourcc or None for RGB, RGB masks)
 FORMATS = {
     18: (4, 8, b'DXT1'), 19: (4, 16, b'DXT3'), 20: (4, 16, b'DXT5'), 49: (4, 16, b'ATI2'), 59: (4, 8, b'ATI1'),
     51: (4, 8, b'DXT1'), 52: (4, 16, b'DXT3'), 53: (4, 16, b'DXT5'),
@@ -41,7 +41,7 @@ def align(v, a):
 
 
 def tiled_offset(x, y, pitch, bpp_log2):
-    # texture_address.h do Xenia (igual ao TiledOffset2D do runtime); pitch em blocos, ja alinhado a 32
+    # Xenia's texture_address.h (same as the runtime's TiledOffset2D); pitch in blocks, already aligned to 32
     outer = ((y >> 5) * (pitch >> 5) + (x >> 5)) << 6
     inner = (((y >> 1) & 7) << 3) | (x & 7)
     oib = (outer | inner) << bpp_log2
@@ -86,10 +86,10 @@ class Fetch:
 
 
 def levels(f, bw, bpb):
-    # (nivel, largura, altura, deslocamento do armazenamento, pitch em blocos, x/y em blocos, passo entre faces):
-    # GetGuestTextureLayout do Xenia (2D e cubo). Mips: dimensoes de potencia de 2, alinhadas a 32x32 blocos (linear:
-    # linha alinhada a 256 bytes), em sequencia a partir de mip_address (cada nivel com as 6 faces no cubo); a partir do
-    # nivel empacotado (menor lado <= 16 texels) todos os niveis dividem um armazenamento, cada um num deslocamento.
+    # (level, width, height, storage offset, pitch in blocks, x/y in blocks, step between faces):
+    # Xenia's GetGuestTextureLayout (2D and cube). Mips: power-of-two dimensions, aligned to 32x32 blocks (linear:
+    # rows aligned to 256 bytes), in sequence starting at mip_address (each level with the 6 faces for cubes); from the
+    # packed level on (smaller side <= 16 texels) all levels share one storage, each at an offset.
     w, h = f.width, f.height
     faces = 6 if f.dimension == 3 else 1
     max_level = min(f.max_level, max(w, h).bit_length() - 1)
@@ -158,7 +158,7 @@ def level_blocks(f, lv, bw, bpb, face=0):
 
 
 def rgba_order(swizzle):
-    # posicao (0-3) do byte de cada canal R, G, B, A depois do endian; 4/5 = 0/1
+    # position (0-3) of each R, G, B, A channel byte after the endian swap; 4/5 = 0/1
     return [(swizzle >> (3 * i)) & 7 for i in range(4)]
 
 
@@ -212,7 +212,7 @@ def import_texture(f, fmt, data, dds):
     expected = dds_header(f, fmt, len(lvls), bw, bpb)
     blocks = sum(((lv[1] + bw - 1) // bw) * ((lv[2] + bw - 1) // bw) for lv in lvls) * (6 if f.dimension == 3 else 1)
     if len(dds) != 128 + blocks * bpb or dds[:128] != expected:
-        raise ValueError('formato/tamanho/mipmaps diferentes do original')
+        raise ValueError('format/size/mipmaps differ from the original')
     buf = bytearray(swap(data, f.endian))
     order = rgba_order(f.swizzle) if fmt[2] is None else None
     p = 128
@@ -233,14 +233,14 @@ def import_texture(f, fmt, data, dds):
 
 
 def name_starts(buf):
-    # nomes de recurso no .toc/.soi: "C\..." ou "c\..." (CT_SM usa minusculas)
+    # resource names in the .toc/.soi: "C\..." or "c\..." (CT_SM uses lowercase)
     return [m.start() for m in re.finditer(rb'[Cc]\\', buf)]
 
 
-def scene_textures(res_dir, raw_size, sem_registros=False):
-    # [(nome, Fetch, [(posicao no .str cru, tamanho), ...])]: a lista de texturas de cada registro de stream vem logo
-    # depois dele no .toc (no HUB, uma por zona; a mesma textura pode estar em varias zonas). sem_registros: stream sem
-    # registros (MiniMap, ja cru no disco) -> posicoes diretas no arquivo
+def scene_textures(res_dir, raw_size, no_records=False):
+    # [(name, Fetch, [(position in the raw .str, size), ...])]: the texture list of each stream record comes right
+    # after it in the .toc (in HUB, one per zone; the same texture can be in several zones). no_records: stream without
+    # records (MiniMap, already raw on disk) -> positions directly in the file
     names = os.listdir(res_dir)
     soi_name = [n for n in names if n.lower().endswith('.soi')]
     toc_name = [n for n in names if n.lower().endswith('.toc')]
@@ -249,11 +249,11 @@ def scene_textures(res_dir, raw_size, sem_registros=False):
     soi = open(os.path.join(res_dir, soi_name[0]), 'rb').read()
     toc = open(os.path.join(res_dir, toc_name[0]), 'rb').read()
     recs = sorted(se.find_records(toc, raw_size), key=lambda r: r[0])
-    if not recs and not sem_registros:
+    if not recs and not no_records:
         return []
-    sections = not recs   # sem registros: posicao de cada peca no "Section_N" dela (abaixo)
+    sections = not recs   # no records: position of each piece in its own "Section_N" (below)
     if not recs:
-        recs = [(0, 0, raw_size, 0, 1, 0, (raw_size,))]   # um trecho A do tamanho do arquivo
+        recs = [(0, 0, raw_size, 0, 1, 0, (raw_size,))]   # one part A the size of the file
     starts = [r[0] for r in recs]
     places = {}
     for i in name_starts(toc):
@@ -261,8 +261,8 @@ def scene_textures(res_dir, raw_size, sem_registros=False):
             name = toc[i:i + 0x100].split(b'\0')[0]
             fields = struct.unpack_from('>6I', toc, i + 0x100)
             if sections and i >= 16:
-                # MiniMap: cada peca tem o seu "Section_N" terminando em {posicao, total, total, 0} logo antes
-                # do nome; a posicao da textura (fields[3]) e relativa a essa secao
+                # MiniMap: each piece has its own "Section_N" ending in {position, total, total, 0} right before
+                # the name; the texture position (fields[3]) is relative to that section
                 off, tot, da = struct.unpack_from(">3I", toc, i - 16)
                 if tot and tot == da and off % 0x800 == 0 and off + tot <= raw_size and fields[3] + fields[4] <= tot:
                     fields = fields[:3] + (off + fields[3],) + fields[4:]
@@ -286,17 +286,17 @@ def scene_textures(res_dir, raw_size, sem_registros=False):
 
 
 def write_stream_folder(raw, res_dir, folder, merge_gap=0x4000):
-    # Pasta do stream (mods\...\X.x360.str\), lida pelo runtime (scene_assets.cpp) no lugar do .str:
-    #   <nome da textura>.dds   cada textura do stream (todas as copias no stream recebem o mesmo .dds)
-    #   _dados\XXXXXXXX.bin     o resto do stream (geometria e o enchimento dos tiles), na posicao XXXXXXXX
-    #   _indice.txt             tamanho do stream, texturas (fetch constant, tamanho, posicoes) e dados
-    # O runtime zera o stream, copia os _dados e escreve os blocos de cada .dds (com tiling/endian do Xbox) por cima.
+    # Stream folder (mods\...\X.x360.str\), read by the runtime (scene_assets.cpp) instead of the .str:
+    #   <texture name>.dds     each texture of the stream (all copies in the stream get the same .dds)
+    #   _data\XXXXXXXX.bin     the rest of the stream (geometry and tile padding), at position XXXXXXXX
+    #   _index.txt             stream size, textures (fetch constant, size, positions) and data
+    # The runtime zeroes the stream, copies the _data and writes the blocks of each .dds (with Xbox tiling/endian) on top.
     texs = scene_textures(res_dir, len(raw))
     rest = bytearray(raw)
-    lines = ['# Stream da cena montado pelo runtime a partir desta pasta (tools/scenes_extract.py).',
-             '# Edite os .dds mantendo formato, tamanho e numero de mipmaps (veja as colunas). Nao edite este indice.',
-             'tamanho %X' % len(raw),
-             '# textura <fetch constant: 6 dwords> <tamanho> <posicoes no stream> <arquivo>  | formato largura x altura mipmaps']
+    lines = ['# Scene stream built by the runtime from this folder (tools/scenes_extract.py).',
+             '# Edit the .dds files keeping format, size and mipmap count (see the columns). Do not edit this index.',
+             'size %X' % len(raw),
+             '# texture <fetch constant: 6 dwords> <size> <positions in the stream> <file>  | format width x height mipmaps']
     written = 0
     for name, f, places in texs:
         fmt = FORMATS.get(f.format)
@@ -319,11 +319,11 @@ def write_stream_folder(raw, res_dir, folder, merge_gap=0x4000):
                     for o in level_blocks(f, level, bw, bpb, face):
                         if o + bpb <= size:
                             rest[q + o:q + o + bpb] = bytes(bpb)
-        lines.append('textura %s %X %s %s  | fmt %d %dx%d mips %d%s' % (
+        lines.append('texture %s %X %s %s  | fmt %d %dx%d mips %d%s' % (
             ' '.join('%08X' % v for v in f.raw), size, ','.join('%X' % q for q, _ in places), rel, f.format, f.width,
-            f.height, n, ' cubo' if faces == 6 else ''))
+            f.height, n, ' cube' if faces == 6 else ''))
         written += 1
-    # trechos nao-zero do resto (juntando buracos pequenos)
+    # non-zero runs of the rest (merging small holes)
     runs = []
     i = 0
     n = len(rest)
@@ -343,31 +343,45 @@ def write_stream_folder(raw, res_dir, folder, merge_gap=0x4000):
             i += len(chunk)
         end = i - gap
         runs.append((start, end))
-    os.makedirs(os.path.join(folder, '_dados'), exist_ok=True)
+    os.makedirs(os.path.join(folder, '_data'), exist_ok=True)
     for start, end in runs:
-        fn = '_dados\\%08X.bin' % start
-        with open(os.path.join(folder, '_dados', '%08X.bin' % start), 'wb') as fp:
+        fn = '_data\\%08X.bin' % start
+        with open(os.path.join(folder, '_data', '%08X.bin' % start), 'wb') as fp:
             fp.write(rest[start:end])
-        lines.append('dados %X %s' % (start, fn))
-    with open(os.path.join(folder, '_indice.txt'), 'w', encoding='latin-1', newline='\r\n') as fp:
+        lines.append('data %X %s' % (start, fn))
+    with open(os.path.join(folder, '_index.txt'), 'w', encoding='latin-1', newline='\r\n') as fp:
         fp.write('\n'.join(lines) + '\n')
     return written, len(runs)
 
 
+def index_file(folder):
+    # _index.txt; _indice.txt in folders extracted by older versions of this tool
+    new = os.path.join(folder, '_index.txt')
+    return new if os.path.exists(new) else os.path.join(folder, '_indice.txt')
+
+
+def old_keywords(line):
+    # Portuguese keywords of older indexes (tamanho/textura/dados)
+    for old, new in (('tamanho ', 'size '), ('textura ', 'texture '), ('dados ', 'data ')):
+        if line.startswith(old):
+            return new + line[len(old):]
+    return line
+
+
 def build_from_folder(folder):
-    # O mesmo que o runtime faz (scene_assets.cpp): usado para conferir a pasta logo depois de extrair
+    # The same as the runtime does (scene_assets.cpp): used to check the folder right after extracting
     size = 0
     texs = []
     datas = []
-    for line in open(os.path.join(folder, '_indice.txt'), encoding='latin-1'):
-        line = line.rstrip('\r\n')
-        if line.startswith('tamanho '):
+    for line in open(index_file(folder), encoding='latin-1'):
+        line = old_keywords(line.rstrip('\r\n'))
+        if line.startswith('size '):
             size = int(line.split()[1], 16)
-        elif line.startswith('textura '):
+        elif line.startswith('texture '):
             parts = line.split('  |')[0].split(' ', 9)
             fetch = [int(x, 16) for x in parts[1:7]]
             texs.append((Fetch(fetch), int(parts[7], 16), [int(x, 16) for x in parts[8].split(',')], parts[9]))
-        elif line.startswith('dados '):
+        elif line.startswith('data '):
             _, pos, fn = line.split(' ', 2)
             datas.append((int(pos, 16), fn))
     buf = bytearray(size)
@@ -384,4 +398,4 @@ def build_from_folder(folder):
 
 
 if __name__ == '__main__':
-    print('Use tools/scenes_extract.py (este arquivo e a parte das texturas).')
+    print('Use tools/scenes_extract.py (this file is the texture part).')

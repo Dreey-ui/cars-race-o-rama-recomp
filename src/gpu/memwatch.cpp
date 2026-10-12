@@ -1,4 +1,4 @@
-// Vigilancia de escrita em paginas da memoria fisica guest (veja memwatch.h)
+// Write tracking on guest physical memory pages (see memwatch.h)
 #include "memwatch.h"
 #include "runtime.h"
 
@@ -11,18 +11,18 @@
 namespace
 {
 constexpr uint32_t kPageShift = 12;
-constexpr uint32_t kPages = 0x20000000u >> kPageShift;   // 512 MB fisicos
+constexpr uint32_t kPages = 0x20000000u >> kPageShift;   // 512 MB physical
 constexpr uint32_t kViews[3] = { 0xA0000000u, 0xC0000000u, 0xE0000000u };
-// Escrita de novo em menos de kDynamicWindow frames -> dinamica por kDynamicHold frames
+// Written again within kDynamicWindow frames -> dynamic for kDynamicHold frames
 constexpr uint32_t kDynamicWindow = 30, kDynamicHold = 600;
 
-std::atomic<uint64_t> g_clean[kPages / 64];   // bit = pagina vigiada e sem escrita
+std::atomic<uint64_t> g_clean[kPages / 64];   // bit = page watched and unwritten
 uint32_t g_lastFault[kPages];
 uint32_t g_dynamicUntil[kPages];
 std::atomic<uint32_t> g_frame{ 0 };
-std::atomic<uint32_t> g_epoch{ 1 };           // muda a cada escrita detectada (checagem rapida dos caches)
+std::atomic<uint32_t> g_epoch{ 1 };           // changes on every detected write (fast check for the caches)
 std::atomic<uint32_t> g_faults{ 0 };
-std::mutex g_mutex;   // mudancas de protecao
+std::mutex g_mutex;   // protection changes
 
 void SetProtection(uint32_t firstPage, uint32_t count, DWORD prot)
 {
@@ -83,7 +83,7 @@ bool MemWatchProtect(uint32_t phys, uint32_t size)
         return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     const uint32_t first = phys >> kPageShift, last = (phys + size - 1) >> kPageShift;
-    // protege so as sequencias de paginas ainda nao vigiadas
+    // protect only the runs of pages not yet watched
     uint32_t runStart = UINT32_MAX;
     for (uint32_t p = first; p <= last + 1; p++)
     {
@@ -109,7 +109,7 @@ bool MemWatchHandleWriteFault(uint32_t guestAddr)
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!IsCleanPage(page))
     {
-        // outra thread ja liberou a pagina entre a excecao e o lock: so repete a instrucao
+        // another thread already unprotected the page between the exception and the lock: just retry the instruction
         MEMORY_BASIC_INFORMATION mbi;
         return VirtualQuery(g_mem.base + guestAddr, &mbi, sizeof(mbi)) && (mbi.Protect & PAGE_READWRITE);
     }

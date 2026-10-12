@@ -1,4 +1,4 @@
-// Registradores da GPU Xenos usados pelo backend (indices de register_table.inc do Xenia)
+// Xenos GPU registers used by the backend (indices from Xenia's register_table.inc)
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -62,7 +62,7 @@ constexpr uint32_t PA_SU_POLY_OFFSET_FRONT_SCALE = 0x2380;
 constexpr uint32_t PA_SU_POLY_OFFSET_FRONT_OFFSET = 0x2381;
 
 constexpr uint32_t ALU_CONSTANTS = 0x4000;    // 512 float4: VS 0..255, PS 256..511
-constexpr uint32_t FETCH_CONSTANTS = 0x4800;  // 32 x 6 dwords (texturas) = 96 x 2 dwords (vertices)
+constexpr uint32_t FETCH_CONSTANTS = 0x4800;  // 32 x 6 dwords (textures) = 96 x 2 dwords (vertices)
 constexpr uint32_t BOOL_CONSTANTS = 0x4900;   // 8 dwords = 256 bits
 constexpr uint32_t LOOP_CONSTANTS = 0x4908;   // 32 dwords
 
@@ -73,5 +73,5 @@ inline uint32_t Bits(uint32_t v, uint32_t lo, uint32_t n) { return (v >> lo) & (
 inline int32_t SBits(uint32_t v, uint32_t lo, uint32_t n) { return int32_t(v << (32 - lo - n)) >> (32 - n); }
 inline float AsFloat(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
 
-// Enderecos fisicos da GPU -> endereco guest (memoria fisica mapeada em 0xA0000000)
+// GPU physical addresses -> guest address (physical memory mapped at 0xA0000000)
 inline uint32_t GpuPhysToGuest(uint32_t p) { return 0xA0000000u | (p & 0x1FFFFFFFu); }

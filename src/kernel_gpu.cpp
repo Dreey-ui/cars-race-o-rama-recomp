@@ -1,6 +1,6 @@
-// GPU: interrupcao de vblank (60 Hz) + processador de comandos PM4 (semantica do Xenia).
-// Consome o ring buffer, mantem o arquivo de registradores da Xenos, executa escritas de memoria/fences
-// e entrega shaders, draws, resolves e swaps ao backend D3D12 (gpu/renderer.cpp).
+// GPU: vblank interrupt (60 Hz) + PM4 command processor (Xenia semantics).
+// Consumes the ring buffer, keeps the Xenos register file, performs memory writes/fences
+// and hands shaders, draws, resolves and swaps to the D3D12 backend (gpu/renderer.cpp).
 #include "kernel.h"
 #include "gpu/renderer.h"
 #include "gpu/xenos_regs.h"
@@ -15,25 +15,25 @@
 static std::atomic<uint32_t> g_gfxCallback{ 0 };
 static std::atomic<uint32_t> g_gfxContext{ 0 };
 static std::atomic<bool> g_vblankStarted{ false };
-static std::recursive_mutex g_callbackMutex;   // o callback de interrupcao nunca roda em duas threads ao mesmo tempo (reentrante: GpuImmediateVblank)
+static std::recursive_mutex g_callbackMutex;   // the interrupt callback never runs on two threads at once (reentrant: GpuImmediateVblank)
 
-// Registradores da GPU ficam mapeados em 0x7FC80000 (indice * 4)
+// GPU registers are mapped at 0x7FC80000 (index * 4)
 constexpr uint32_t GPU_MMIO_BASE = 0x7FC80000;
 constexpr uint32_t REG_CP_RB_RPTR = 0x01C4;
 constexpr uint32_t REG_CP_RB_WPTR = 0x01C5;
 
 static uint32_t g_regs[xreg::kRegisterCount];
-static uint32_t g_rbBase = 0;          // endereco guest (virtual) do ring buffer
+static uint32_t g_rbBase = 0;          // guest (virtual) address of the ring buffer
 static uint32_t g_rbSizeDwords = 0;
 static uint32_t g_rptr = 0;
 static std::atomic<uint32_t> g_rptrWriteback{ 0 };
 static std::atomic<bool> g_cpStarted{ false };
 static std::atomic<uint64_t> g_swapCount{ 0 };
-static uint32_t g_swapCounter = 0;     // contador da GPU (EVENT_WRITE_SHD com bit 31)
+static uint32_t g_swapCounter = 0;     // GPU counter (EVENT_WRITE_SHD with bit 31)
 static std::atomic<uint64_t> g_cpSwapsSeen{ 0 }, g_cpBatches{ 0 };
-static std::atomic<uint32_t> g_cpLastOpcode{ 0 }, g_cpLastAddr{ 0 }, g_cpStage{ 0 };   // diagnostico de travamento
+static std::atomic<uint32_t> g_cpLastOpcode{ 0 }, g_cpLastAddr{ 0 }, g_cpStage{ 0 };   // hang diagnostics
 static std::atomic<uint64_t> g_cpLoops{ 0 };
-static uint64_t g_binMask = ~0ull, g_binSelect = ~0ull;   // predicacao de pacotes (tiling)
+static uint64_t g_binMask = ~0ull, g_binSelect = ~0ull;   // packet predication (tiling)
 static uint32_t ReadWptr();
 
 uint64_t GpuSwapCount() { return g_swapCount.load(); }
@@ -41,13 +41,13 @@ uint32_t* GpuRegisters() { return g_regs; }
 
 static uint32_t PhysToGuest(uint32_t p) { return p >= 0xA0000000 ? p : 0xA0000000 | (p & 0x1FFFFFFF); }
 
-// Registradores de display/EDRAM que o D3D le via MMIO (valores do GraphicsSystem::ReadRegister do Xenia)
+// Display/EDRAM registers that D3D reads via MMIO (values from Xenia's GraphicsSystem::ReadRegister)
 static void SetMmioDisplayRegisters()
 {
     W32(GPU_MMIO_BASE + 0x0F00 * 4, 0x08100748);   // RB_EDRAM_TIMING
     W32(GPU_MMIO_BASE + 0x0F01 * 4, 0x0000200E);   // RB_BC_CONTROL
     W32(GPU_MMIO_BASE + 0x0F2D * 4, 0x00BBBBBB);   // RB_HSIO_INTERFACE_ALIGNER_VALUE
-    W32(GPU_MMIO_BASE + 0x1951 * 4, 1);            // status de interrupcao: vblank
+    W32(GPU_MMIO_BASE + 0x1951 * 4, 1);            // interrupt status: vblank
     W32(GPU_MMIO_BASE + 0x1961 * 4, 0x050002D0);   // AVIVO_D1MODE_VIEWPORT_SIZE 1280x720
 }
 
@@ -58,15 +58,15 @@ static void CallInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu = 2)
         return;
     std::lock_guard<std::recursive_mutex> lock(g_callbackMutex);
     SetMmioDisplayRegisters();
-    W8(ctx.r13.u32 + 0x10C, uint8_t(cpu));   // PCR: processador atual
+    W8(ctx.r13.u32 + 0x10C, uint8_t(cpu));   // PCR: current processor
     ctx.r3.u64 = source;
     ctx.r4.u64 = g_gfxContext.load();
     try { CallGuest(ctx, g_mem.base, cb); } catch (const GuestThreadExit&) {}
 }
 
-// Vblank imediato (modo 60 fps): chamado de dentro do callback de interrupcao do swap (sub_822C4708, thread da GPU) para o
-// flip enfileirado acontecer na hora, sem a GPU esperar o proximo vblank de 60 Hz; o ritmo fica com o vsync do host.
-// Usa uma copia do contexto e preserva o processador no PCR (o callback de fora usa esse numero logo depois).
+// Immediate vblank (60 fps mode): called from inside the swap interrupt callback (sub_822C4708, GPU thread) so the
+// queued flip happens right away, without the GPU waiting for the next 60 Hz vblank; pacing is left to the host vsync.
+// Uses a copy of the context and preserves the processor in the PCR (the outer callback uses that number right after).
 void GpuImmediateVblank(const PPCContext& caller)
 {
     PPCContext tmp = caller;
@@ -83,19 +83,19 @@ static void VBlankThread()
     KInitContext(*ctx, gt);
     KSetCurrentThread(gt);
     auto next = std::chrono::steady_clock::now();
-    // CARS_VBLANK_HZ: frequencia do vblank emulado (diagnostico; padrao 60 Hz)
+    // CARS_VBLANK_HZ: frequency of the emulated vblank (diagnostics; default 60 Hz)
     const int hz = getenv("CARS_VBLANK_HZ") ? std::max(1, atoi(getenv("CARS_VBLANK_HZ"))) : 60;
     const auto period = std::chrono::microseconds(1000000 / hz);
     for (;;)
     {
         next += period;
         std::this_thread::sleep_until(next);
-        CallInterrupt(*ctx, 0);   // fonte 0 = vblank
+        CallInterrupt(*ctx, 0);   // source 0 = vblank
     }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Processador PM4
+// PM4 command processor
 
 static uint32_t GpuSwap(uint32_t value, uint32_t endian)
 {
@@ -108,7 +108,7 @@ static uint32_t GpuSwap(uint32_t value, uint32_t endian)
     }
 }
 
-// Os 2 bits baixos do endereco dizem o swap (Xenia: GpuSwap + store little-endian)
+// The 2 low bits of the address give the swap (Xenia: GpuSwap + little-endian store)
 static void WriteWithEndian(uint32_t addr, uint32_t value)
 {
     *(uint32_t*)(g_mem.base + PhysToGuest(addr & ~3u)) = GpuSwap(value, addr & 3);
@@ -134,7 +134,7 @@ static bool Compare(uint32_t func, uint32_t value, uint32_t ref)
     }
 }
 
-// Bancos de constantes ALU escritos desde o ultimo draw (bit 0: VS c0..c255, bit 1: PS): o renderer so recopia esses
+// ALU constant banks written since the last draw (bit 0: VS c0..c255, bit 1: PS): the renderer only re-copies those
 uint32_t g_aluDirty = 3;
 
 static void WriteRegister(uint32_t index, uint32_t value)
@@ -146,23 +146,23 @@ static void WriteRegister(uint32_t index, uint32_t value)
         g_aluDirty |= alu < 1024 ? 1u : 2u;
     else if (index - xreg::SCRATCH_REG0 < 8)
     {
-        // Writeback dos registradores scratch para a memoria (usado pelo D3D para fences)
+        // Writeback of the scratch registers to memory (used by D3D for fences)
         const uint32_t n = index - xreg::SCRATCH_REG0;
         if ((1u << n) & g_regs[xreg::SCRATCH_UMSK])
             W32(PhysToGuest(g_regs[xreg::SCRATCH_ADDR] + n * 4), value);
     }
     else if (index == xreg::COHER_STATUS_HOST)
     {
-        g_regs[index] = 0;   // coerencia "imediata"
+        g_regs[index] = 0;   // "immediate" coherency
     }
 }
 
 struct CmdReader
 {
-    uint32_t base;      // endereco guest
-    uint32_t sizeDw;    // tamanho em dwords
-    uint32_t pos;       // em dwords
-    bool ring;          // ring buffer (com wrap) ou indirect buffer
+    uint32_t base;      // guest address
+    uint32_t sizeDw;    // size in dwords
+    uint32_t pos;       // in dwords
+    bool ring;          // ring buffer (with wrap) or indirect buffer
     uint32_t Next()
     {
         const uint32_t v = R32(base + pos * 4);
@@ -175,7 +175,7 @@ struct CmdReader
 
 static void ExecuteCommands(CmdReader& rd, uint32_t endPos, PPCContext& ctx, int depth);
 
-// Tempo ocupado do processador de comandos e tempo esperando a CPU (WAIT_REG_MEM), para as estatisticas
+// Busy time of the command processor and time waiting for the CPU (WAIT_REG_MEM), for the statistics
 static std::atomic<uint64_t> g_cpBusyUs{ 0 }, g_cpWaitUs{ 0 };
 uint64_t GpuTakeCpBusyUs() { return g_cpBusyUs.exchange(0); }
 uint64_t GpuTakeCpWaitUs() { return g_cpWaitUs.exchange(0); }
@@ -192,7 +192,7 @@ static void ExecuteDraw(CmdReader& rd, uint32_t remaining, uint32_t& used)
     const uint32_t source = (initiator >> 6) & 3;
     d.index32 = (initiator >> 11) & 1;
     d.numIndices = initiator >> 16;
-    if (source == 0)   // DMA: indices na memoria
+    if (source == 0)   // DMA: indices in memory
     {
         if (remaining < 3)
             return;
@@ -206,7 +206,7 @@ static void ExecuteDraw(CmdReader& rd, uint32_t remaining, uint32_t& used)
     }
     else if (source == 1)
     {
-        return;   // indices imediatos: nao usado pelo D3D9 do 360
+        return;   // immediate indices: not used by the 360's D3D9
     }
     RendererDraw(d);
 }
@@ -221,7 +221,7 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
     g_cpLastAddr = rd.Address();
     g_cpStage = 1;
 
-    // Predicacao (predicated tiling do D3D): pacote com bit 0 so executa se o bin atual estiver selecionado
+    // Predication (D3D predicated tiling): a packet with bit 0 only executes if the current bin is selected
     if ((header & 1) && ((g_binSelect & g_binMask) == 0 || opcode == 0x64))
     {
         rd.Skip(count);
@@ -267,7 +267,7 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
         WriteWithEndian(addr, value);
         break;
     }
-    case 0x5A:   // EVENT_WRITE_EXT (extents de tela)
+    case 0x5A:   // EVENT_WRITE_EXT (screen extents)
     {
         next();
         const uint32_t addr = next();
@@ -301,19 +301,19 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
         const uint32_t pollAddr = next();
         const uint32_t ref = next();
         const uint32_t mask = next();
-        next();  // intervalo
+        next();  // interval
         static const bool logWaits = getenv("CARS_LOG_WAITS") != nullptr;
         static int waitLogs = 0;
         if (logWaits && waitLogs < 60)
         {
             waitLogs++;
-            fprintf(stderr, "[wait] swap %llu: %s %08X func %u ref %08X mask %08X valor atual %08X\n",
+            fprintf(stderr, "[wait] swap %llu: %s %08X func %u ref %08X mask %08X current value %08X\n",
                     (unsigned long long)g_swapCount.load(), (info & 0x10) ? "mem" : "reg", pollAddr, info & 7, ref, mask,
                     (info & 0x10) ? ReadWithEndian(pollAddr) : g_regs[pollAddr & 0x7FFF]);
         }
         if (info & 0x10)
         {
-            // espera em memoria: o CPU escreve o valor; espera um pouco e segue (evita deadlock)
+            // memory wait: the CPU writes the value; wait a bit and move on (avoids deadlock)
             const auto waitStart = std::chrono::steady_clock::now();
             const auto limit = waitStart + std::chrono::milliseconds(100);
             const uint32_t before = ReadWithEndian(pollAddr);
@@ -321,19 +321,19 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
                 std::this_thread::yield();
             const uint64_t waitedUs = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitStart).count());
             g_cpWaitUs += waitedUs;
-            // CARS_LOG_SLOW_WAITS=N: loga as esperas de mais de 1 ms a partir do swap N
+            // CARS_LOG_SLOW_WAITS=N: logs waits longer than 1 ms starting at swap N
             static const uint64_t slowFrom = getenv("CARS_LOG_SLOW_WAITS") ? strtoull(getenv("CARS_LOG_SLOW_WAITS"), nullptr, 10) : 0;
             static int slowLogs = 0;
             if (slowFrom && g_swapCount >= slowFrom && waitedUs > 1000 && slowLogs < 80)
             {
                 slowLogs++;
-                fprintf(stderr, "[wait-lenta] swap %llu: mem %08X func %u ref %08X mask %08X antes %08X depois %08X: %.2f ms\n",
+                fprintf(stderr, "[slow-wait] swap %llu: mem %08X func %u ref %08X mask %08X before %08X after %08X: %.2f ms\n",
                         (unsigned long long)g_swapCount.load(), pollAddr, info & 7, ref, mask, before, ReadWithEndian(pollAddr),
                         waitedUs / 1000.0);
             }
             static int timeouts = 0;
             if (!Compare(info, ReadWithEndian(pollAddr) & mask, ref) && timeouts++ < 8)
-                fprintf(stderr, "[cp] WAIT_REG_MEM expirou: mem %08X valor %08X mask %08X func %u ref %08X\n", pollAddr,
+                fprintf(stderr, "[cp] WAIT_REG_MEM timed out: mem %08X value %08X mask %08X func %u ref %08X\n", pollAddr,
                         ReadWithEndian(pollAddr), mask, info & 7, ref);
         }
         break;
@@ -375,7 +375,7 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
         break;
     }
 
-    // ---- constantes e estado ----
+    // ---- constants and state ----
     case 0x2D:   // SET_CONSTANT
     {
         const uint32_t offsetType = next();
@@ -426,7 +426,7 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
         const uint32_t sizeDwords = std::min(startSize & 0xFFFF, count - 2);
         if (rd.ring && rd.pos + sizeDwords > rd.sizeDw)
         {
-            // microcodigo cruzando o fim do ring: copia linear
+            // microcode crossing the end of the ring: linear copy
             std::vector<uint32_t> tmp(sizeDwords);
             for (uint32_t i = 0; i < sizeDwords; i++)
                 tmp[i] = __builtin_bswap32(next());
@@ -439,13 +439,13 @@ static void ExecuteType3(CmdReader& rd, uint32_t header, PPCContext& ctx, int de
         break;
     }
     case 0x22:   // DRAW_INDX
-        next();  // token de viz query
+        next();  // viz query token
         ExecuteDraw(rd, count - used, used);
         break;
     case 0x36:   // DRAW_INDX_2
         ExecuteDraw(rd, count - used, used);
         break;
-    case 0x64:   // XE_SWAP (escrito pelo nosso VdSwap)
+    case 0x64:   // XE_SWAP (written by our VdSwap)
     {
         const uint32_t magic = next();
         const uint32_t fb = next();
@@ -503,7 +503,7 @@ static void ExecuteCommands(CmdReader& rd, uint32_t endPos, PPCContext& ctx, int
 
 static uint32_t ReadWptr()
 {
-    // O D3D escreve o registrador com byte-swap ou nao; aceita o que couber no ring
+    // D3D writes the register byte-swapped or not; accept whichever fits in the ring
     const uint32_t raw = *(uint32_t*)(g_mem.base + GPU_MMIO_BASE + REG_CP_RB_WPTR * 4);
     const uint32_t swapped = __builtin_bswap32(raw);
     if (swapped < g_rbSizeDwords) return swapped;
@@ -520,8 +520,8 @@ static void CommandProcessorThread()
     KSetCurrentThread(gt);
     extern void HostProfilerRegisterCurrentThread(const char* name);
     HostProfilerRegisterCurrentThread("gpu cp");
-    // Latencia baixa: o D3D do jogo espera fences da GPU em sequencia (carregamento de texturas etc.).
-    // Depois de trabalho recente, gira com yield por ~4 ms antes de voltar a dormir.
+    // Low latency: the game's D3D waits for GPU fences in sequence (texture loading etc.).
+    // After recent work, spin with yield for ~4 ms before going back to sleep.
     timeBeginPeriod(1);
     auto lastWork = std::chrono::steady_clock::now();
     for (;;)
@@ -556,7 +556,7 @@ KERNEL_IMPORT(VdSetGraphicsInterruptCallback)
     g_gfxCallback = ctx.r3.u32;
     g_gfxContext = ctx.r4.u32;
     if (g_traceImports)
-        fprintf(stderr, "[gpu] callback de interrupcao = %08X, contexto = %08X\n", ctx.r3.u32, ctx.r4.u32);
+        fprintf(stderr, "[gpu] interrupt callback = %08X, context = %08X\n", ctx.r3.u32, ctx.r4.u32);
     if (ctx.r3.u32 && !g_vblankStarted.exchange(true))
         std::thread(VBlankThread).detach();
 }
@@ -575,7 +575,7 @@ KERNEL_IMPORT(VdInitializeRingBuffer)
     g_rbSizeDwords = (1u << (ctx.r4.u32 + 3)) / 4;
     g_rptr = 0;
     if (g_traceImports)
-        fprintf(stderr, "[gpu] ring buffer em %08X, %u dwords\n", g_rbBase, g_rbSizeDwords);
+        fprintf(stderr, "[gpu] ring buffer at %08X, %u dwords\n", g_rbBase, g_rbSizeDwords);
     if (!g_cpStarted.exchange(true))
         std::thread(CommandProcessorThread).detach();
 }
@@ -584,18 +584,18 @@ KERNEL_IMPORT(VdEnableRingBufferRPtrWriteBack)
 {
     g_rptrWriteback = PhysToGuest(ctx.r3.u32);
     if (g_traceImports)
-        fprintf(stderr, "[gpu] writeback do RPTR em %08X\n", g_rptrWriteback.load());
+        fprintf(stderr, "[gpu] RPTR writeback at %08X\n", g_rptrWriteback.load());
 }
 
 KERNEL_IMPORT(VdSetSystemCommandBufferGpuIdentifierAddress) {}
 
-// Se retornar 0, o D3D entra num modo degradado ("treino do HSIO falhou") e para de chutar o ring buffer
+// If it returns 0, D3D enters a degraded mode ("HSIO training failed") and stops kicking the ring buffer
 KERNEL_IMPORT(VdIsHSIOTrainingSucceeded) { ctx.r3.u64 = 1; }
 KERNEL_IMPORT(VdRetrainEDRAM) { ctx.r3.u64 = 0; }
 KERNEL_IMPORT(VdRetrainEDRAMWorker) { ctx.r3.u64 = 0; }
 KERNEL_IMPORT(VdSetDisplayMode) { ctx.r3.u64 = 0; }
 KERNEL_IMPORT(VdCallGraphicsNotificationRoutines) { ctx.r3.u64 = 0; }
-KERNEL_IMPORT(VdQueryVideoFlags) { ctx.r3.u64 = 1 | 2; }   // widescreen, >= 1280 de largura
+KERNEL_IMPORT(VdQueryVideoFlags) { ctx.r3.u64 = 1 | 2; }   // widescreen, >= 1280 wide
 
 KERNEL_IMPORT(VdGetSystemCommandBuffer)
 {
@@ -639,13 +639,13 @@ KERNEL_IMPORT(VdGetCurrentDisplayInformation)
     W16(p + 0x56, 1280);
 }
 
-// VdPersistDisplay(?, saida*): o kernel mantem a imagem atual na tela enquanto o jogo carrega (sem swaps). *saida recebe
-// um bloco fisico que o jogo devolve depois com MmFreePhysicalMemory (como o Xenia)
+// VdPersistDisplay(?, out*): the kernel keeps the current image on screen while the game loads (no swaps). *out receives
+// a physical block the game later returns with MmFreePhysicalMemory (like Xenia)
 KERNEL_IMPORT(VdPersistDisplay)
 {
     static std::atomic<int> n{ 0 };
     if (n++ < 20)
-        fprintf(stderr, "[vd] VdPersistDisplay(%08X, %08X) no swap %llu\n", ctx.r3.u32, ctx.r4.u32, (unsigned long long)g_swapCount.load());
+        fprintf(stderr, "[vd] VdPersistDisplay(%08X, %08X) at swap %llu\n", ctx.r3.u32, ctx.r4.u32, (unsigned long long)g_swapCount.load());
     if (ctx.r4.u32)
         W32(ctx.r4.u32, g_physicalHeap.Alloc(64, 32));
     ctx.r3.u64 = 0;
@@ -653,8 +653,8 @@ KERNEL_IMPORT(VdPersistDisplay)
 
 KERNEL_IMPORT(VdSwap)
 {
-    // VdSwap(buffer, fetch do frontbuffer, ...): o D3D reserva 64 dwords no command buffer para o kernel.
-    // Escrevemos um pacote XE_SWAP (como o Xenia) para o processador de comandos apresentar o frame na ordem certa.
+    // VdSwap(buffer, frontbuffer fetch, ...): D3D reserves 64 dwords in the command buffer for the kernel.
+    // We write an XE_SWAP packet (like Xenia) so the command processor presents the frame in the right order.
     const uint32_t buffer = ctx.r3.u32;
     const uint32_t fetch = ctx.r4.u32;
     uint32_t fb = 0, w = 0, h = 0;
@@ -674,10 +674,10 @@ KERNEL_IMPORT(VdSwap)
     if (n == 1)
         fprintf(stderr, "[gpu] frontbuffer %08X %ux%u\n", fb, w, h);
     if (n % 300 == 0)
-        fprintf(stderr, "[cp] VdSwap %llu, XE_SWAP processados %llu, lotes do ring %llu, rptr %u, ultimo opcode %03X em %08X (etapa %u)\n",
+        fprintf(stderr, "[cp] VdSwap %llu, XE_SWAP processed %llu, ring batches %llu, rptr %u, last opcode %03X at %08X (stage %u)\n",
                 (unsigned long long)n, (unsigned long long)g_cpSwapsSeen.load(), (unsigned long long)g_cpBatches.load(), g_rptr,
                 g_cpLastOpcode.load(), g_cpLastAddr.load(), g_cpStage.load());
     if (n % 300 == 0)
-        fprintf(stderr, "[cp] wptr atual %u, iteracoes do laco %llu\n", ReadWptr(), (unsigned long long)g_cpLoops.load());
+        fprintf(stderr, "[cp] current wptr %u, loop iterations %llu\n", ReadWptr(), (unsigned long long)g_cpLoops.load());
     ctx.r3.u64 = 0;
 }
