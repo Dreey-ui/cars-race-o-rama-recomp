@@ -1,0 +1,29 @@
+# Compilacao (o exe leva o XEX do jogo embutido: nunca publicar)
+build/
+out/
+
+# Arquivos do jogo e derivados (scripts Lua descompilados, dumps, caches)
+lua_src/
+*.xex
+shader_cache/
+audio_dump.*
+d3d_profile.txt
+frame_*.png
+frame_*.bmp
+
+# Logs de teste
+*.log
+logs/
+
+# Dependencias binarias (veja third_party/LEIA-ME.md)
+third_party/*
+!third_party/LEIA-ME.md
+
+# Copia antiga do inicio do projeto
+cars-runtime/
+
+# Python / editores
+__pycache__/
+*.pyc
+.vs/
+.vscode/

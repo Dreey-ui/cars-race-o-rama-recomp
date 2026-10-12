@@ -1,0 +1,18 @@
+# Gerado por tools/find_missing_switches.py (tabelas absolutas que faltavam)
+[[switch]]
+base = 0x82167698
+r = 5
+labels = [
+    0x821677AC,
+    0x821677F0,
+    0x821677F0,
+    0x821677F0,
+    0x821676C8,
+    0x82167784,
+    0x82167734,
+    0x8216775C,
+    0x821677F0,
+    0x821677F0,
+    0x821677D4,
+]
+

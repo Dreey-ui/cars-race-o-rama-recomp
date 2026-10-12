@@ -1,0 +1,61 @@
+[main]
+# Caminhos relativos a este arquivo (rode o XenonRecomp na pasta C:\DEB\cars)
+file_path = "default_dec.xex"
+out_directory_path = "ppc"
+switch_table_file_path = "cars_switch_tables.toml"
+
+# Otimizações desligadas no começo (mais lento, mas mais seguro para depurar).
+# Só ligue depois que o jogo estiver rodando.
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_register_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Rotinas auxiliares do compilador para salvar/restaurar registradores
+# (o jogo chama as versões _14 até _31 pulando de 4 em 4 bytes dentro delas).
+savegprlr_14_address = 0x82506410
+restgprlr_14_address = 0x82506460
+savefpr_14_address = 0x82506EC0
+restfpr_14_address = 0x82506F0C
+savevmx_14_address = 0x82507470
+restvmx_14_address = 0x82507708
+savevmx_64_address = 0x82507504
+restvmx_64_address = 0x8250779C
+
+# setjmp / longjmp da CRT do jogo
+setjmp_address = 0x825071A0
+longjmp_address = 0x825060F0
+
+# Palavras que são padding/dados dentro da área de código
+invalid_instructions = [
+    { data = 0x00000000, size = 4 },
+]
+
+# Funções cujo tamanho o analisador calcula errado: ele corta a função no
+# "bctr" do switch, e os blocos dos cases (que ficam logo depois) acabam fora.
+# Tamanhos conferidos contra o .pdata do XEX e os alvos de chamada (bl).
+functions = [
+    { address = 0x8212A7E8, size = 0x298 },
+    { address = 0x8212AA80, size = 0x158 },
+    { address = 0x821D1AC0, size = 0xE0 },
+    { address = 0x821FCE78, size = 0xE8 },
+    { address = 0x82249078, size = 0xE8 },
+    { address = 0x8226EB78, size = 0xD0 },
+    { address = 0x8228AD60, size = 0x1A8 },
+    { address = 0x8228AE38, size = 0xD0 },
+    { address = 0x822F8EF8, size = 0x18 },   # stub: 5x mr + "b 0x822F8F10" (sem isso o analisador a funde com a função seguinte)
+    { address = 0x822F8F10, size = 0xBF0 },
+    { address = 0x8217CEC8, size = 0x148 },   # switch com tabela inline logo apos o bctr; sem .pdata
+    { address = 0x82347AA0, size = 0x118 },
+    { address = 0x823963F8, size = 0x110 },
+    { address = 0x823FD838, size = 0xC8 },
+    { address = 0x824EA190, size = 0x68 },
+    { address = 0x824EA1F8, size = 0x68 },
+    { address = 0x824EA260, size = 0x60 },
+    { address = 0x824EA2C0, size = 0x198 },
+    { address = 0x824EA458, size = 0x170 },
+]
